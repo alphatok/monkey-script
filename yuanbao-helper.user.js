@@ -327,13 +327,28 @@
         }, 30);
     }
 
+    function findMoreButton(item) {
+        const selectors = [
+            '[class*="more"]',
+            '[aria-label*="更多"]',
+            '[aria-label*="More"]',
+            'button[class*="menu"]',
+            '[class*="action"]',
+        ];
+        for (const sel of selectors) {
+            const btn = item.querySelector(sel);
+            if (btn) return btn;
+        }
+        const buttons = item.querySelectorAll('button, [role="button"], svg');
+        if (buttons.length > 0) return buttons[buttons.length - 1];
+        return null;
+    }
+
     function findDeleteButtonInNode(node) {
-        // 优先找按钮或 role=button
         const btn = node.querySelector('button, [role="button"]');
         if (btn && (btn.textContent?.trim() === '删除' || btn.textContent?.trim() === 'Delete')) {
             return btn;
         }
-        // 再找任意包含"删除"文本的元素
         const all = node.querySelectorAll('*');
         for (const el of all) {
             const t = el.textContent?.trim();
