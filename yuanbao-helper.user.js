@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         元宝助手 - Yuanbao Helper
 // @namespace    http://tampermonkey.net/
-// @version      1.4.1
+// @version      1.4.2
 // @description  腾讯元宝聊天页面增强：快捷键发送、自动聚焦、界面精简、会话一键删除
 // @author       You
 // @match        https://yuanbao.tencent.com/chat/*
@@ -22,6 +22,12 @@
 
     // 真实删除 API（从页面 webpack 模块 6231 deleteAgentHistory 抓取）
     const DELETE_API = '/api/user/agent/conversation/v1/clear';
+
+    // 元宝不同列表（最近 / 分组 / 收藏）用的属性名不完全一致，全部兼容
+    const CONV_ID_ATTRS = [
+        'data-conversation-id', 'data-conv-id', 'data-cid', 'dt-cid'
+    ];
+    const CONV_SELECTOR = CONV_ID_ATTRS.map((a) => '[' + a + ']').join(', ');
 
     // ========== 功能 1：快捷键发送消息 ==========
     function initShortcutSend() {
@@ -210,7 +216,7 @@
         `;
         document.head.appendChild(style);
 
-        const observer = new MutationObserver(() => {
+        const injectAll = () => {
             for (const item of collectConvItems()) {
                 if (item.dataset.__yhDeleteInjected) continue;
                 item.dataset.__yhDeleteInjected = '1';
@@ -247,28 +253,63 @@
 
                 log('已注入删除按钮');
             }
+        };
+
+        // rAF 节流：SPA 里 DOM 变动极频繁，避免每次变动都全量扫描 + 触发重排
+        let scheduled = false;
+        const observer = new MutationObserver(() => {
+            if (scheduled) return;
+            scheduled = true;
+            requestAnimationFrame(() => { scheduled = false; injectAll(); });
         });
 
         observer.observe(document.body, { childList: true, subtree: true });
+        injectAll();
         log('删除按钮注入已启用');
     }
 
-    // 收集所有会话行：普通最近列表 + Group 分组 + 其它容器
-    function collectConvItems() {
-        // 限定在左侧导航区内，避免把按钮注入到聊天正文
-        const root = document.querySelector('.yb-nav__content')
-            || document.querySelector('.yb-nav')
-            || document.body;
+    // 收集所有会话行：普通最近列表 + Group 分组 + 弹层/portal 里的分组列表
+    const LISTISH = /conv|group|session|history|recent|chat-item/i;
 
+    function isListRow(el) {
+        // 排除聊天正文
+        if (el.closest('[class*="chat-content"], [class*="message-list"], [class*="agent-chat"]')) {
+            return false;
+        }
+        // 1) class 命中 conv/group/session 之类
+        let node = el;
+        for (let i = 0; i < 4 && node; i++, node = node.parentElement) {
+            if (LISTISH.test(String(node.className || ''))) return true;
+        }
+        // 2) 几何兜底：窄行 + 位于左半屏（分组弹层的 class 未必带 group）
+        const rect = el.getBoundingClientRect();
+        if (rect.width > 0 && rect.width <= 420 && rect.height > 0 && rect.height <= 120
+            && rect.left < window.innerWidth / 2) {
+            return true;
+        }
+        return false;
+    }
+
+    function collectConvItems() {
         const set = new Set();
 
-        // 1) 已知的最近会话列表项
-        root.querySelectorAll('.yb-recent-conv-list__item').forEach((el) => set.add(el));
+        // 1) 左侧导航区：已知列表项 + 任何带会话 id 的最内层元素
+        const nav = document.querySelector('.yb-nav__content') || document.querySelector('.yb-nav');
+        if (nav) {
+            nav.querySelectorAll('.yb-recent-conv-list__item').forEach((el) => set.add(el));
+            nav.querySelectorAll(CONV_SELECTOR).forEach((el) => {
+                if (el.closest('.yb-recent-conv-list__item')) return;  // 已被上一行覆盖
+                if (el.querySelector(CONV_SELECTOR)) return;           // 只取最内层
+                set.add(el);
+            });
+        }
 
-        // 2) 兜底：任何持有 data-conversation-id / dt-cid 的最内层元素
-        root.querySelectorAll('[data-conversation-id], [dt-cid]').forEach((el) => {
-            if (el.closest('.yb-recent-conv-list__item')) return;   // 已被 1) 覆盖
-            if (el.querySelector('[data-conversation-id], [dt-cid]')) return; // 取最内层
+        // 2) 全文档兜底：Group 分组可能被渲染到 portal，不在 nav 内
+        document.querySelectorAll(CONV_SELECTOR).forEach((el) => {
+            if (el.closest('.yb-recent-conv-list__item')) return;
+            if (el.querySelector(CONV_SELECTOR)) return;
+            if (el.closest('[class*="chat-content"], [class*="message-list"], [class*="agent-chat"]')) return;
+            if (!isListRow(el)) return;
             set.add(el);
         });
 
@@ -277,11 +318,16 @@
 
     // ========== 功能 7：直接调用删除 API ==========
     function getConvId(item) {
-        // 会话项有 data-conversation-id / dt-cid 属性
-        return item.getAttribute('data-conversation-id')
-            || item.getAttribute('dt-cid')
-            || item.querySelector('[data-conversation-id]')?.getAttribute('data-conversation-id')
-            || null;
+        for (const attr of CONV_ID_ATTRS) {
+            const v = item.getAttribute && item.getAttribute(attr);
+            if (v) return v;
+        }
+        for (const attr of CONV_ID_ATTRS) {
+            const inner = item.querySelector && item.querySelector('[' + attr + ']');
+            const v = inner && inner.getAttribute(attr);
+            if (v) return v;
+        }
+        return null;
     }
 
     function getWebpackRequire() {
@@ -741,6 +787,24 @@
         }
     }
 
+    // ========== 诊断：控制台执行 yhDump() 可打印识别到的会话行 ==========
+    function installDiagnostics() {
+        window.yhDump = function () {
+            const rows = collectConvItems();
+            console.table(rows.map((el, i) => ({
+                '#': i,
+                class: String(el.className || '').substring(0, 50),
+                id: getConvId(el),
+                attrs: [...el.attributes].map((a) => a.name).join(','),
+                text: (el.innerText || '').replace(/\s+/g, ' ').substring(0, 30)
+            })));
+            console.log('[元宝助手] nav:', !!document.querySelector('.yb-nav__content'),
+                '| 识别行数:', rows.length,
+                '| 全页带会话 id 节点:', document.querySelectorAll(CONV_SELECTOR).length);
+            return rows.length;
+        };
+    }
+
     // ========== 通用工具 ==========
     function showToast(msg) {
         const toast = document.createElement('div');
@@ -758,7 +822,7 @@
 
     function showLoadedBadge() {
         const badge = document.createElement('div');
-        badge.textContent = '元宝助手 v1.4.1';
+        badge.textContent = '元宝助手 v1.4.2';
         badge.style.cssText = `
             position: fixed; bottom: 12px; left: 12px; background: #07c160;
             color: #fff; padding: 4px 10px; border-radius: 4px; font-size: 12px;
@@ -774,7 +838,7 @@
         if (window.__yuanbaoHelperLoaded) return;
         window.__yuanbaoHelperLoaded = true;
 
-        console.log('[元宝助手] v1.4.1 已加载');
+        console.log('[元宝助手] v1.4.2 已加载');
 
         initShortcutSend();
         initAutoFocus();
@@ -783,6 +847,7 @@
         initAutoTempSession();
         initHoverDelete();
         initBatchPanel();
+        installDiagnostics();
         initNewChatProtection();
         showLoadedBadge();
     }
