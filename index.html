@@ -3,15 +3,16 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>元宝助手 - 安装</title>
+    <title>脚本安装向导 - 元宝 / DeepSeek</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             background: #f5f5f5;
             display: flex;
-            justify-content: center;
-            align-items: flex-start;
+            flex-direction: column;
+            align-items: center;
+            gap: 20px;
             min-height: 100vh;
             padding: 40px 20px;
         }
@@ -108,6 +109,16 @@
             pointer-events: none;
         }
 
+        .alt-link {
+            margin-top: 14px;
+            font-size: 12px;
+            color: #999;
+            text-align: center;
+            line-height: 1.8;
+            word-break: break-all;
+        }
+        .alt-link a { color: #07c160; }
+
         .warning {
             display: none;
             background: #fff7e6;
@@ -133,19 +144,10 @@
 </head>
 <body>
     <div class="card">
-        <h1>元宝助手</h1>
-        <p class="subtitle">腾讯元宝聊天页面增强工具</p>
+        <h1>脚本安装向导</h1>
+        <p class="subtitle">元宝 / DeepSeek 聊天页面增强</p>
 
-        <div class="feature">Enter 发送消息，Shift+Enter 换行</div>
-        <div class="feature">页面加载后自动聚焦输入框</div>
-        <div class="feature">自动隐藏底部下载横幅</div>
-        <div class="feature">双击聊天消息复制内容</div>
-        <div class="feature">默认进入临时会话（可手动取消）</div>
-        <div class="feature">会话列表悬停显示 × ，点击直接删除</div>
-        <div class="feature">Group 分组内的会话同样支持一键删除</div>
-        <div class="feature">右下角悬浮面板：多关键词 AND 匹配批量删除，可自定义关键词</div>
-
-        <div class="section-title">安装步骤</div>
+        <div class="section-title">安装步骤（两个脚本通用）</div>
 
         <div class="step">
             <div class="step-num">1</div>
@@ -172,8 +174,8 @@
         <div class="step">
             <div class="step-num">3</div>
             <div class="step-body">
-                <strong>点击下面的按钮安装脚本</strong><br>
-                如果 Tampermonkey 正常工作，会弹出一个确认窗口，显示脚本内容，点击<strong>"安装"</strong>即可。
+                <strong>在下面选择要装的脚本，点安装</strong><br>
+                Tampermonkey 会弹出确认窗口显示脚本内容，点击<strong>"安装"</strong>即可。
             </div>
         </div>
 
@@ -181,29 +183,57 @@
             <div class="step-num">4</div>
             <div class="step-body">
                 <strong>验证安装</strong><br>
-                访问
-                <a href="https://yuanbao.tencent.com/chat/" target="_blank">https://yuanbao.tencent.com/chat/</a>
-                ，在输入框按 Enter 测试是否能发送消息。
+                打开对应站点，页面右下角会出现圆形的<strong>「批删」</strong>悬浮球，说明脚本已生效。
             </div>
         </div>
 
-        <a class="install-btn" id="install-btn" href="./yuanbao-helper.user.js">
-            安装到 Tampermonkey
-        </a>
-
-        <p style="margin-top:14px;font-size:13px;color:#888;text-align:center;line-height:1.7;">
-            按钮打不开？改用在线地址安装（不需要本地服务器）：<br>
-            <a href="https://raw.githubusercontent.com/alphatok/monkey-script/main/yuanbao-helper.user.js"
-               style="color:#07c160;">raw.githubusercontent.com/.../yuanbao-helper.user.js</a>
-        </p>
-
         <div id="local-warning" class="warning">
             <strong>⚠️ 检测到本地文件打开</strong><br>
-            浏览器安全限制导致 <code>file://</code> 下的脚本无法被 Tampermonkey 处理。二选一：<br>
+            浏览器安全限制导致 <code>file://</code> 下的脚本无法被 Tampermonkey 处理。三选一：<br>
             • 按 Step 2 开启<strong>"允许访问文件网址"</strong>后刷新本页；<br>
             • 或在脚本目录运行 <code>python3 serve.py</code>，再访问 <code>http://localhost:8080/index.html</code>；<br>
-            • 或直接用上面的 <strong>GitHub 在线地址</strong>安装。
+            • 或直接用下面每个脚本的 <strong>GitHub 在线地址</strong>安装。
         </div>
+    </div>
+
+    <div class="card">
+        <h1>元宝助手</h1>
+        <p class="subtitle">腾讯元宝聊天页面增强工具</p>
+
+        <div class="feature">Enter 发送消息，Shift+Enter 换行</div>
+        <div class="feature">页面加载后自动聚焦输入框</div>
+        <div class="feature">自动隐藏底部下载横幅</div>
+        <div class="feature">双击聊天消息复制内容</div>
+        <div class="feature">默认进入临时会话（可手动取消）</div>
+        <div class="feature">会话列表悬停显示 × ，点击直接删除</div>
+        <div class="feature">Group 分组内的会话同样支持一键删除</div>
+        <div class="feature">右下角悬浮面板：多关键词 AND 匹配批量删除，可自定义关键词</div>
+
+        <a class="install-btn" href="./yuanbao-helper.user.js">安装元宝助手</a>
+
+        <p class="alt-link">
+            打不开？用在线地址：<br>
+            <a href="https://raw.githubusercontent.com/alphatok/monkey-script/main/yuanbao-helper.user.js"
+               target="_blank">raw.githubusercontent.com/alphatok/monkey-script/main/yuanbao-helper.user.js</a>
+        </p>
+    </div>
+
+    <div class="card">
+        <h1>DeepSeek 助手</h1>
+        <p class="subtitle">chat.deepseek.com 页面增强工具</p>
+
+        <div class="feature">会话列表悬停显示 × ，点击直接删除</div>
+        <div class="feature">双击聊天消息复制内容</div>
+        <div class="feature">右下角悬浮面板：多关键词 AND 匹配批量删除，可自定义关键词</div>
+        <div class="feature">最近 N 个 + 随机间隔（默认 2-5 秒），避免触发风控</div>
+
+        <a class="install-btn" href="./deepseek-helper.user.js" style="background:#4d6bfe;">安装 DeepSeek 助手</a>
+
+        <p class="alt-link">
+            打不开？用在线地址：<br>
+            <a href="https://raw.githubusercontent.com/alphatok/monkey-script/main/deepseek-helper.user.js"
+               target="_blank" style="color:#4d6bfe;">raw.githubusercontent.com/alphatok/monkey-script/main/deepseek-helper.user.js</a>
+        </p>
     </div>
 
     <script>
