@@ -240,7 +240,7 @@
         return item;
     }
 
-    // ========== 功能 7：删除会话 ==========
+    // ========== 功能 7：删除会话（无感知：看不到菜单和弹窗） ==========
     function deleteSession(item) {
         if (isProtectedSession(item)) {
             showToast('该会话为新建会话，已跳过删除');
@@ -248,89 +248,116 @@
             return;
         }
 
-        // 步骤 1：触发 mouseenter 让操作按钮显示
+        // 步骤 1：注入 CSS 隐藏菜单视觉，让用户看不到下拉框
+        const hideStyleId = 'yh-hide-menu-' + Date.now();
+        const hideStyle = document.createElement('style');
+        hideStyle.id = hideStyleId;
+        hideStyle.textContent = `
+            [class*="menu"], [class*="dropdown"], [class*="popup"], [class*="t-popup"],
+            [class*="t-dropdown"], [class*="t-tooltip"] {
+                opacity: 0 !important;
+            }
+        `;
+        document.head.appendChild(hideStyle);
+
+        // 步骤 2：触发 mouseenter 让操作按钮显示
         item.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true, cancelable: true }));
 
-        // 步骤 2：找"三个点"按钮（更多操作）
+        // 步骤 3：找"三个点"按钮
         const moreBtn = findMoreButton(item);
-
-        if (moreBtn) {
-            log('找到"三个点"按钮:', moreBtn.className?.substring(0,50) || moreBtn.tagName);
-
-            // 步骤 3：触发 mouseenter 让按钮可见
-            moreBtn.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true, cancelable: true }));
-
-            // 步骤 4：点击打开菜单
-            setTimeout(() => {
-                moreBtn.click();
-                log('已点击"三个点"按钮');
-
-                // 步骤 5：等待菜单弹出，点击删除
-                setTimeout(() => {
-                    clickDeleteInMenu();
-                }, 200);
-            }, 50);
+        if (!moreBtn) {
+            log('未找到"三个点"按钮');
+            document.head.removeChild(hideStyle);
             return;
         }
 
-        // 兜底：模拟右键
-        item.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }));
-        log('尝试右键菜单删除');
+        log('找到"三个点"按钮');
+
+        // 步骤 4：触发 mouseenter 让按钮可见，然后点击打开菜单
+        moreBtn.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true, cancelable: true }));
+
+        // 步骤 5：用 MutationObserver 监听菜单创建，出现后立刻点击删除
+        let menuClicked = false;
+        const menuObserver = new MutationObserver((mutations) => {
+            if (menuClicked) return;
+
+            for (const mutation of mutations) {
+                for (const node of mutation.addedNodes) {
+                    if (node.nodeType !== 1) continue;
+
+                    // 检查这个节点或其子节点是否包含"删除"
+                    const deleteEl = node.textContent?.includes('删除') || node.textContent?.includes('Delete')
+                        ? findDeleteButtonInNode(node)
+                        : null;
+
+                    if (deleteEl) {
+                        menuClicked = true;
+                        deleteEl.click();
+                        log('已极速点击菜单中的删除选项');
+
+                        // 清理：移除隐藏 CSS
+                        setTimeout(() => {
+                            const s = document.getElementById(hideStyleId);
+                            if (s) document.head.removeChild(s);
+                        }, 300);
+
+                        menuObserver.disconnect();
+                        return;
+                    }
+                }
+            }
+        });
+
+        menuObserver.observe(document.body, { childList: true, subtree: true });
+
+        // 步骤 6：点击"三个点"打开菜单
+        setTimeout(() => {
+            moreBtn.click();
+            log('已点击"三个点"打开菜单');
+
+            // 兜底：如果 MutationObserver 没捕获到，用传统方式
+            setTimeout(() => {
+                if (!menuClicked) {
+                    clickDeleteInMenuFallback();
+                    const s = document.getElementById(hideStyleId);
+                    if (s) document.head.removeChild(s);
+                    menuObserver.disconnect();
+                }
+            }, 250);
+        }, 30);
     }
 
-    function findMoreButton(item) {
-        // 多种策略查找"更多"按钮
-        const selectors = [
-            '[class*="more"]',
-            '[aria-label*="更多"]',
-            '[aria-label*="More"]',
-            'button[class*="menu"]',
-            '[class*="action"]',
-        ];
-        for (const sel of selectors) {
-            const btn = item.querySelector(sel);
-            if (btn) return btn;
+    function findDeleteButtonInNode(node) {
+        // 优先找按钮或 role=button
+        const btn = node.querySelector('button, [role="button"]');
+        if (btn && (btn.textContent?.trim() === '删除' || btn.textContent?.trim() === 'Delete')) {
+            return btn;
         }
-        // 兜底：查找最后一个 button 或 svg
-        const buttons = item.querySelectorAll('button, [role="button"], svg');
-        if (buttons.length > 0) return buttons[buttons.length - 1];
+        // 再找任意包含"删除"文本的元素
+        const all = node.querySelectorAll('*');
+        for (const el of all) {
+            const t = el.textContent?.trim();
+            if (t === '删除' || t === 'Delete') {
+                return el;
+            }
+        }
         return null;
     }
 
-    function clickDeleteInMenu() {
-        // 策略 1：通过文字内容查找删除选项
+    function clickDeleteInMenuFallback() {
         const allEls = document.querySelectorAll('*');
         for (const el of allEls) {
             const text = el.textContent?.trim();
             if (text === '删除' || text === 'Delete') {
-                // 确保元素可见且可点击
                 const rect = el.getBoundingClientRect();
                 if (rect.width > 0 && rect.height > 0) {
-                    el.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
-                    setTimeout(() => {
-                        el.click();
-                        log('已点击菜单中的删除选项');
-                    }, 30);
+                    el.click();
+                    log('兜底：已点击菜单中的删除选项');
                     return;
                 }
             }
         }
-
-        // 策略 2：在弹出的菜单/下拉框中查找
-        const menuContainers = document.querySelectorAll('[class*="menu"], [class*="dropdown"], [class*="popup"], [class*="t-popup"]');
-        for (const menu of menuContainers) {
-            const deleteItem = [...menu.querySelectorAll('*')].find(el => {
-                const t = el.textContent?.trim();
-                return t === '删除' || t === 'Delete';
-            });
-            if (deleteItem) {
-                deleteItem.click();
-                log('已通过菜单容器点击删除');
-                return;
-            }
-        }
-
-        log('未找到菜单中的删除选项');
+        log('兜底：未找到删除选项');
     }
 
     function isProtectedSession(item) {
