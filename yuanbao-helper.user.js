@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         元宝助手 - Yuanbao Helper
 // @namespace    http://tampermonkey.net/
-// @version      1.2.0
-// @description  腾讯元宝聊天页面增强：快捷键发送、自动聚焦、界面精简、会话快速删除
+// @version      1.3.0
+// @description  腾讯元宝聊天页面增强：快捷键发送、自动聚焦、界面精简、会话一键删除
 // @author       You
 // @match        https://yuanbao.tencent.com/chat/*
 // @grant        none
@@ -20,6 +20,9 @@
     let lastNewChatTime = 0;
     const NEW_CHAT_PROTECT_MS = 30000;
 
+    // 真实删除 API（从页面 webpack 模块 6231 deleteAgentHistory 抓取）
+    const DELETE_API = '/api/user/agent/conversation/v1/clear';
+
     // ========== 功能 1：快捷键发送消息 ==========
     function initShortcutSend() {
         document.addEventListener('keydown', (e) => {
@@ -35,22 +38,22 @@
     }
 
     function clickSendButton() {
-        // 支持中英文界面多种选择器
-        const btn = document.querySelector('[aria-label="发送"]')
+        // 实际 DOM: <div id="yuanbao-send-btn" aria-label="Send">
+        const btn = document.getElementById('yuanbao-send-btn')
+            || document.querySelector('[aria-label="发送"]')
             || document.querySelector('[aria-label="Send"]')
-            || document.querySelector('button[class*="send"]')
-            || document.querySelector('div[class*="SendButton"]')
-            || [...document.querySelectorAll('button, div[role="button"]')]
-                .find(b => {
-                    const aria = b.getAttribute('aria-label') || '';
-                    return aria.includes('发送') || aria.includes('Send');
-                });
-        if (btn) {
-            btn.click();
-            log('已触发发送');
-        } else {
+            || document.querySelector('[class*="SendButton"]');
+        if (!btn) {
             log('未找到发送按钮');
+            return;
         }
+        const cls = String(btn.className || '');
+        if (cls.includes('disabled') || btn.getAttribute('aria-disabled') === 'true') {
+            log('发送按钮禁用中');
+            return;
+        }
+        btn.click();
+        log('已触发发送');
     }
 
     // ========== 功能 2：自动聚焦输入框 ==========
@@ -63,17 +66,13 @@
         };
         setTimeout(tryFocus, 800);
         const observer = new MutationObserver(() => setTimeout(tryFocus, 100));
-        const chatContainer = document.querySelector('[class*="chat"]')
-            || document.querySelector('[class*="message"]')
-            || document.body;
-        observer.observe(chatContainer, { childList: true, subtree: true });
+        observer.observe(document.body, { childList: true, subtree: true });
     }
 
     function findInputBox() {
         return document.querySelector('textarea[placeholder]')
             || document.querySelector('[contenteditable="true"]')
-            || document.querySelector('textarea')
-            || document.querySelector('[class*="input"] textarea');
+            || document.querySelector('textarea');
     }
 
     // ========== 功能 3：精简界面 ==========
@@ -94,12 +93,11 @@
     function initCopyOnDblclick() {
         document.addEventListener('dblclick', (e) => {
             const bubble = e.target.closest('[class*="message"]')
-                || e.target.closest('[class*="bubble"]')
-                || e.target.closest('[class*="content"]');
+                || e.target.closest('[class*="bubble"]');
             if (!bubble) return;
             const text = bubble.innerText;
             if (text) {
-                navigator.clipboard.writeText(text).then(() => showToast('已复制到剪贴板'));
+                navigator.clipboard.writeText(text).then(() => showToast('已复制'));
             }
         });
         log('双击复制已启用');
@@ -109,51 +107,32 @@
     function initAutoTempSession() {
         const LS_KEY = 'yh_user_disabled_temp';
 
-        // 检测用户是否手动取消了 temp 模式
         function detectUserCancelTemp() {
-            const url = new URL(location.href);
+            const isTemp = new URL(location.href).searchParams.get('chatMode') === 'temp';
             const wasTemp = sessionStorage.getItem('yh_last_was_temp') === '1';
-            const isTemp = url.searchParams.get('chatMode') === 'temp';
-
             if (wasTemp && !isTemp) {
-                // 用户从 temp 模式切回了普通模式
                 localStorage.setItem(LS_KEY, '1');
-                log('检测到用户手动取消临时会话，已记住偏好');
+                log('用户手动取消临时会话，记住偏好');
             }
-
             sessionStorage.setItem('yh_last_was_temp', isTemp ? '1' : '0');
         }
 
-        // 页面加载时检测一次
         detectUserCancelTemp();
-
-        // 如果用户手动取消过，不再自动进入 temp
         const userDisabled = localStorage.getItem(LS_KEY) === '1';
-        if (userDisabled) {
-            log('用户已手动取消临时会话，保持当前模式');
-        }
+        if (userDisabled) log('用户已禁用自动临时会话');
 
         const tryEnterTemp = () => {
-            if (userDisabled) return;
-
-            const url = new URL(location.href);
-            if (url.searchParams.get('chatMode') === 'temp') {
-                log('当前已是临时会话模式');
-                return;
-            }
-
+            if (localStorage.getItem(LS_KEY) === '1') return;
+            if (new URL(location.href).searchParams.get('chatMode') === 'temp') return;
             const tempBtn = document.querySelector('[aria-label="Enter Temporary Chat"]');
             if (tempBtn) {
                 tempBtn.click();
-                log('已点击"进入临时会话"');
-                return;
+                log('已进入临时会话');
             }
         };
 
-        // 首次进入时延迟尝试
         setTimeout(tryEnterTemp, 1000);
 
-        // 监听 URL 变化
         let lastUrl = location.href;
         const urlObserver = new MutationObserver(() => {
             if (location.href !== lastUrl) {
@@ -164,17 +143,14 @@
         });
         urlObserver.observe(document.body, { childList: true, subtree: true });
 
-        // 拦截新建对话，改为临时模式（仅当用户未手动取消时）
+        // 拦截新建对话，改为临时会话
         document.addEventListener('click', (e) => {
             if (localStorage.getItem(LS_KEY) === '1') return;
-
             const target = e.target.closest('.yb-new-chat-entry__item')
                 || e.target.closest('[aria-label="New Chat"]');
             if (!target) return;
-
             const url = new URL(location.href);
             if (url.searchParams.get('chatMode') !== 'temp') {
-                log('拦截新建对话，改为临时会话模式');
                 e.preventDefault();
                 e.stopPropagation();
                 url.searchParams.set('chatMode', 'temp');
@@ -182,24 +158,23 @@
             }
         }, true);
 
-        log('自动进入临时会话已启用（尊重用户手动取消）');
+        log('自动临时会话已启用');
     }
 
     // ========== 功能 6：会话列表注入删除按钮 ==========
     function initHoverDelete() {
         const style = document.createElement('style');
         style.textContent = `
-            .yh-conv-item {
-                position: relative !important;
-            }
+            .yh-conv-item { position: relative !important; }
             .yh-delete-btn {
                 display: none !important;
                 align-items: center;
                 justify-content: center;
-                width: 24px;
-                height: 24px;
-                margin-right: 4px;
-                background: rgba(255,255,255,0.9);
+                width: 22px;
+                height: 22px;
+                margin-right: 2px;
+                padding: 0;
+                background: transparent;
                 border: none;
                 border-radius: 4px;
                 color: #999;
@@ -207,13 +182,15 @@
                 font-size: 16px;
                 line-height: 1;
                 flex-shrink: 0;
-                transition: color 0.15s;
+                position: relative;
+                z-index: 2;
+                transition: color 0.15s, background 0.15s;
             }
             .yh-delete-btn:hover {
                 color: #ff4d4f;
-                background: rgba(255,77,79,0.1);
+                background: rgba(255,77,79,0.12);
             }
-            .yh-conv-item:hover .yh-delete-btn {
+            .yb-recent-conv-list__item:hover .yh-delete-btn {
                 display: inline-flex !important;
             }
         `;
@@ -223,7 +200,9 @@
             const convList = document.querySelector('.yb-recent-conv-list');
             if (!convList) return;
 
-            for (const item of convList.children) {
+            // 会话项 class 为 yb-recent-conv-list__item
+            const items = convList.querySelectorAll('.yb-recent-conv-list__item');
+            for (const item of items) {
                 if (item.dataset.__yhDeleteInjected) continue;
                 item.dataset.__yhDeleteInjected = '1';
                 item.classList.add('yh-conv-item');
@@ -233,29 +212,25 @@
                 delBtn.textContent = '×';
                 delBtn.title = '删除会话';
 
-                const insertTarget = findInsertTarget(item);
-                if (insertTarget) {
-                    const lastChild = insertTarget.lastElementChild;
-                    if (lastChild && (
-                        lastChild.className?.includes('more') ||
-                        lastChild.getAttribute('aria-label')?.includes('More') ||
-                        lastChild.tagName === 'svg'
-                    )) {
-                        insertTarget.insertBefore(delBtn, lastChild);
-                    } else {
-                        insertTarget.appendChild(delBtn);
-                    }
+                // 插到会话项内最后一个可交互元素（三点按钮）之前
+                const nameEl = item.querySelector('.yb-recent-conv-list__item-name');
+                if (nameEl && nameEl.parentElement) {
+                    nameEl.parentElement.insertBefore(delBtn, nameEl.nextSibling);
                 } else {
                     item.appendChild(delBtn);
                 }
 
-                delBtn.addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    e.preventDefault();
-                    deleteSession(item);
+                // 关键：在捕获阶段拦截所有指针事件，阻止冒泡到会话项触发下拉菜单
+                ['pointerdown', 'mousedown', 'mouseup', 'click', 'dblclick'].forEach((type) => {
+                    delBtn.addEventListener(type, (e) => {
+                        e.stopPropagation();
+                        e.stopImmediatePropagation();
+                        e.preventDefault();
+                        if (type === 'click') deleteSession(item);
+                    }, true);
                 });
 
-                log('已为会话项注入删除按钮');
+                log('已注入删除按钮');
             }
         });
 
@@ -263,186 +238,111 @@
         log('删除按钮注入已启用');
     }
 
-    function findInsertTarget(item) {
-        const flexContainers = item.querySelectorAll('*');
-        for (const el of flexContainers) {
-            const style = window.getComputedStyle(el);
-            if (style.display === 'flex' || style.display === 'inline-flex') {
-                const hasText = Array.from(el.children).some(c => c.textContent.trim().length > 0);
-                const hasButton = el.querySelector('button, [role="button"], svg');
-                if (hasText && hasButton) {
-                    return el;
-                }
-            }
-        }
-        return item;
+    // ========== 功能 7：直接调用删除 API ==========
+    function getConvId(item) {
+        // 会话项有 data-conversation-id / dt-cid 属性
+        return item.getAttribute('data-conversation-id')
+            || item.getAttribute('dt-cid')
+            || item.querySelector('[data-conversation-id]')?.getAttribute('data-conversation-id')
+            || null;
     }
 
-    // ========== 功能 7：删除会话（无感知：看不到菜单和弹窗） ==========
-    function deleteSession(item) {
-        if (isProtectedSession(item)) {
-            showToast('该会话为新建会话，已跳过删除');
-            log('跳过删除：受保护的会话');
-            return;
+    function getWebpackRequire() {
+        const chunks = window.webpackChunk_N_E;
+        if (!chunks) return null;
+        let reqFn = null;
+        const id = '__yh_' + Date.now() + '_' + Math.floor(Math.random() * 1e6);
+        try {
+            chunks.push([[id], {}, function (r) { reqFn = r; }]);
+            const idx = chunks.findIndex(c => c && c[0] && c[0][0] === id);
+            if (idx >= 0) chunks.splice(idx, 1);
+        } catch (e) {
+            log('获取 webpack require 失败:', e.message);
         }
-
-        // 注入 CSS 隐藏菜单视觉
-        const hideStyleId = 'yh-hide-menu-' + Date.now();
-        const hideStyle = document.createElement('style');
-        hideStyle.id = hideStyleId;
-        hideStyle.textContent = `
-            [class*="menu"], [class*="dropdown"], [class*="popup"], [class*="t-popup"],
-            [class*="t-dropdown"], [class*="t-tooltip"] {
-                opacity: 0 !important;
-                pointer-events: auto !important;
-            }
-        `;
-        document.head.appendChild(hideStyle);
-
-        // 触发 mouseenter 让"三个点"按钮显示
-        item.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true, cancelable: true }));
-
-        // 找到"三个点"按钮
-        const moreBtn = findMoreButton(item);
-        if (!moreBtn) {
-            log('未找到"三个点"按钮');
-            cleanupHideStyle(hideStyleId);
-            return;
-        }
-
-        log('找到"三个点"按钮，准备打开菜单');
-
-        // 触发 mouseenter 让按钮可见
-        moreBtn.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true, cancelable: true }));
-
-        // 点击打开菜单（菜单已隐藏，用户看不到）
-        setTimeout(() => {
-            moreBtn.click();
-            log('已打开菜单');
-
-            // 等待菜单渲染后点击删除
-            setTimeout(() => {
-                clickDeleteInMenu();
-                cleanupHideStyle(hideStyleId);
-            }, 80);
-        }, 30);
+        return reqFn;
     }
 
-    function findMoreButton(item) {
-        const selectors = [
-            '[class*="more"]',
-            '[aria-label*="更多"]',
-            '[aria-label*="More"]',
-            'button[class*="menu"]',
-            '[class*="action"]',
-        ];
-        for (const sel of selectors) {
-            const btn = item.querySelector(sel);
-            if (btn) return btn;
-        }
-        const buttons = item.querySelectorAll('button, [role="button"], svg');
-        if (buttons.length > 0) return buttons[buttons.length - 1];
-        return null;
-    }
-
-    function clickDeleteInMenu() {
-        // 在页面中查找"删除"选项（菜单已打开但不可见）
-        const candidates = document.querySelectorAll('button, div[role="button"], li, [class*="menu"] *, [class*="dropdown"] *');
-        for (const el of candidates) {
-            const text = el.textContent?.trim();
-            if (text === '删除' || text === 'Delete') {
-                const rect = el.getBoundingClientRect();
-                if (rect.width > 0 && rect.height > 0) {
-                    el.click();
-                    log('已点击菜单中的删除选项');
+    async function deleteConvById(convId) {
+        // 优先：调用页面内部的 deleteAgentHistory（自动带上 token 等公共参数）
+        const req = getWebpackRequire();
+        if (req) {
+            try {
+                const mod = req(6231);
+                if (mod && typeof mod.deleteAgentHistory === 'function') {
+                    await mod.deleteAgentHistory({
+                        conversationIds: [convId],
+                        uiOptions: { noToast: true }
+                    });
+                    log('已通过 deleteAgentHistory 删除:', convId);
                     return true;
                 }
+            } catch (e) {
+                log('deleteAgentHistory 失败，回退 fetch:', e.message);
             }
         }
-        log('未找到菜单中的删除选项');
-        return false;
+
+        // 回退：直接 fetch 真实 API
+        try {
+            const res = await fetch(DELETE_API, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
+                body: JSON.stringify({
+                    conversationIds: [convId],
+                    uiOptions: { noToast: true }
+                })
+            });
+            const data = await res.json().catch(() => ({}));
+            const ok = res.ok && (data.code === 0 || data.code === undefined);
+            log('fetch 删除结果:', res.status, JSON.stringify(data).substring(0, 120));
+            return ok;
+        } catch (e) {
+            log('fetch 删除异常:', e.message);
+            return false;
+        }
     }
 
-    function cleanupHideStyle(id) {
-        setTimeout(() => {
-            const s = document.getElementById(id);
-            if (s) document.head.removeChild(s);
-        }, 300);
+    async function deleteSession(item) {
+        if (isProtectedSession(item)) {
+            showToast('新建会话受保护，已跳过');
+            return;
+        }
+
+        const convId = getConvId(item);
+        if (!convId) {
+            showToast('无法获取会话 ID');
+            log('未找到 convId，item HTML:', item.outerHTML.substring(0, 300));
+            return;
+        }
+
+        log('准备删除会话:', convId);
+        item.style.opacity = '0.4';
+
+        const ok = await deleteConvById(convId);
+        if (ok) {
+            item.remove();
+            showToast('已删除');
+        } else {
+            item.style.opacity = '';
+            showToast('删除失败，请重试');
+        }
     }
 
     function isProtectedSession(item) {
-        const now = Date.now();
-        if (now - lastNewChatTime < NEW_CHAT_PROTECT_MS) {
-            const isActive = item.classList.contains('active')
-                || item.classList.contains('selected')
-                || item.getAttribute('aria-selected') === 'true'
-                || item.querySelector('[class*="active"]');
-            if (isActive) {
-                log('当前活跃会话受保护');
-                return true;
-            }
-        }
-        return false;
+        if (Date.now() - lastNewChatTime >= NEW_CHAT_PROTECT_MS) return false;
+        return item.classList.contains('active')
+            || item.classList.contains('selected')
+            || item.getAttribute('aria-selected') === 'true';
     }
 
-    // ========== 功能 8：跳过删除确认弹窗 ==========
-    function initSkipConfirm() {
-        const originalConfirm = window.confirm;
-        window.confirm = function(message) {
-            if (message && (
-                message.includes('删除') ||
-                message.includes('Delete') ||
-                message.includes('confirm') ||
-                message.includes('确认')
-            )) {
-                log('拦截确认弹窗:', message);
-                return true;
-            }
-            return originalConfirm.apply(this, arguments);
-        };
-
-        const observer = new MutationObserver((mutations) => {
-            for (const mutation of mutations) {
-                for (const node of mutation.addedNodes) {
-                    if (node.nodeType !== 1) continue;
-                    const text = node.textContent || '';
-                    if ((text.includes('删除') || text.includes('Delete')) &&
-                        (text.includes('确认') || text.includes('Confirm') || text.includes('确定'))) {
-                        const confirmBtn = node.querySelector('button[class*="primary"]')
-                            || node.querySelector('button[class*="confirm"]')
-                            || node.querySelector('button[class*="danger"]')
-                            || [...node.querySelectorAll('button')].find(b =>
-                                b.textContent.includes('确认') ||
-                                b.textContent.includes('确定') ||
-                                b.textContent.includes('Confirm') ||
-                                b.textContent.includes('Delete')
-                            );
-                        if (confirmBtn) {
-                            setTimeout(() => confirmBtn.click(), 50);
-                            log('自动点击确认按钮');
-                        }
-                    }
-                }
-            }
-        });
-
-        observer.observe(document.body, { childList: true, subtree: true });
-        log('跳过删除确认已启用');
-    }
-
-    // ========== 功能 9：监听新建对话 ==========
+    // ========== 功能 8：监听新建对话 ==========
     function initNewChatProtection() {
         document.addEventListener('click', (e) => {
             const target = e.target.closest('.yb-new-chat-entry__item')
-                || e.target.closest('[aria-label="New Chat"]')
-                || e.target.closest('button')
-                || e.target.closest('div[role="button"]');
+                || e.target.closest('[aria-label="New Chat"]');
             if (!target) return;
-            const text = target.textContent || target.getAttribute('aria-label') || '';
-            if (text.includes('New Chat') || text.includes('新建') || text.includes('New')) {
-                lastNewChatTime = Date.now();
-                log('检测到新建对话，设置保护时间');
-            }
+            lastNewChatTime = Date.now();
+            log('新建对话，启动 30s 保护');
         }, true);
     }
 
@@ -451,38 +351,23 @@
         const toast = document.createElement('div');
         toast.textContent = msg;
         toast.style.cssText = `
-            position: fixed;
-            top: 20px;
-            left: 50%;
-            transform: translateX(-50%);
-            background: rgba(0,0,0,0.75);
-            color: #fff;
-            padding: 8px 16px;
-            border-radius: 6px;
-            font-size: 14px;
-            z-index: 99999;
-            pointer-events: none;
+            position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
+            background: rgba(0,0,0,0.78); color: #fff; padding: 8px 16px;
+            border-radius: 6px; font-size: 14px; z-index: 999999;
+            pointer-events: none; transition: opacity 0.3s;
         `;
         document.body.appendChild(toast);
-        setTimeout(() => toast.remove(), 1500);
+        setTimeout(() => { toast.style.opacity = '0'; }, 1200);
+        setTimeout(() => toast.remove(), 1600);
     }
 
     function showLoadedBadge() {
         const badge = document.createElement('div');
-        badge.textContent = '元宝助手已加载';
+        badge.textContent = '元宝助手 v1.3.0';
         badge.style.cssText = `
-            position: fixed;
-            bottom: 12px;
-            left: 12px;
-            background: #07c160;
-            color: #fff;
-            padding: 4px 10px;
-            border-radius: 4px;
-            font-size: 12px;
-            z-index: 99999;
-            opacity: 0.85;
-            pointer-events: none;
-            transition: opacity 0.5s;
+            position: fixed; bottom: 12px; left: 12px; background: #07c160;
+            color: #fff; padding: 4px 10px; border-radius: 4px; font-size: 12px;
+            z-index: 999999; opacity: 0.85; pointer-events: none; transition: opacity 0.5s;
         `;
         document.body.appendChild(badge);
         setTimeout(() => { badge.style.opacity = '0'; }, 3000);
@@ -494,7 +379,7 @@
         if (window.__yuanbaoHelperLoaded) return;
         window.__yuanbaoHelperLoaded = true;
 
-        console.log('[元宝助手] v1.2.0 已加载');
+        console.log('[元宝助手] v1.3.0 已加载');
 
         initShortcutSend();
         initAutoFocus();
@@ -502,7 +387,6 @@
         initCopyOnDblclick();
         initAutoTempSession();
         initHoverDelete();
-        initSkipConfirm();
         initNewChatProtection();
         showLoadedBadge();
     }
