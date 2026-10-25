@@ -2,7 +2,7 @@
 
 > 分析目标：是否可以通过脚本/程序方式实现对 Tampermonkey 插件的脚本新增、编辑等操作。
 >
-> 原始链接：<https://www.tampermonkey.net/documentation.php?locale=en\&q=deploying>
+> 原始链接：<https://www.tampermonkey.net/documentation.php?locale=en\\\&q=deploying>
 >
 > 分析日期：2026-10-25
 
@@ -210,11 +210,11 @@ Tampermonkey 使用浏览器扩展存储（如 IndexedDB/chrome.storage）保存
 
 ## 5. 参考链接
 
-| 链接                                                                      | 说明                            |
-| ----------------------------------------------------------------------- | ----------------------------- |
-| <https://www.tampermonkey.net/documentation.php?locale=en\&q=deploying> | 官方部署文档（Enterprise Deployment） |
-| <https://www.tampermonkey.net/documentation.php>                        | 完整 API 文档                     |
-| <https://www.tampermonkey.net/faq.php>                                  | 常见问题（含 Extension IDs）         |
+| 链接                                                                        | 说明                            |
+| ------------------------------------------------------------------------- | ----------------------------- |
+| <https://www.tampermonkey.net/documentation.php?locale=en\\\&q=deploying> | 官方部署文档（Enterprise Deployment） |
+| <https://www.tampermonkey.net/documentation.php>                          | 完整 API 文档                     |
+| <https://www.tampermonkey.net/faq.php>                                    | 常见问题（含 Extension IDs）         |
 
 ---
 

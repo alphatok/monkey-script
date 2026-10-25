@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DeepSeek 助手 - DeepSeek Helper
 // @namespace    http://tampermonkey.net/
-// @version      1.0.0
+// @version      1.1.0
 // @description  DeepSeek 聊天页面增强：会话一键静默删除、多关键词批量删除、双击复制
 // @author       You
 // @match        https://chat.deepseek.com/*
@@ -16,14 +16,14 @@
     const DEBUG = true;
     const log = (...args) => DEBUG && console.log('[DeepSeek助手]', ...args);
 
-    // 从 main.js 抓到的真实接口
+    // 实测接口：POST /api/v0/chat_session/delete  body: {chat_session_ids: [id]}
+    // 只需 authorization: Bearer <localStorage.userToken.value>，其余 x-client-* 头可省略
     const DELETE_API = '/api/v0/chat_session/delete';
 
-    // 会话 id 可能出现的位置
-    const ID_ATTRS = [
-        'data-session-id', 'data-chat-session-id', 'data-conversation-id',
-        'data-virtual-list-item-key', 'data-id'
-    ];
+    // 会话行就是 <a href="/a/chat/s/<uuid>">
+    const ROW_SELECTOR = 'a[href*="/a/chat/s/"]';
+    // 兜底属性（万一改版）
+    const ID_ATTRS = ['data-session-id', 'data-chat-session-id', 'data-conversation-id'];
     const ID_SELECTOR = ID_ATTRS.map((a) => '[' + a + ']').join(', ');
 
     const batchState = { running: false, stop: false };
@@ -56,46 +56,22 @@
         setTimeout(() => toast.remove(), 1600);
     }
 
+    function getToken() {
+        try {
+            const raw = localStorage.getItem('userToken');
+            if (!raw) return null;
+            const v = JSON.parse(raw);
+            return (v && v.value) || null;
+        } catch (e) {
+            return null;
+        }
+    }
+
     // ========== 会话行识别 ==========
-    function looksLikeId(v) {
-        if (!v) return false;
-        if (/^\d+$/.test(v)) return false;              // 纯数字多半是列表 index
-        return /^[A-Za-z0-9_-]{8,}$/.test(v);
-    }
-
-    function currentSessionId() {
-        const m = location.pathname.match(/\/([A-Za-z0-9_-]{8,})\/?$/);
-        return m ? m[1] : null;
-    }
-
-    function getSessionId(row) {
-        for (const a of ID_ATTRS) {
-            const v = row.getAttribute && row.getAttribute(a);
-            if (looksLikeId(v)) return v;
-        }
-        for (const a of ID_ATTRS) {
-            const el = row.querySelector && row.querySelector('[' + a + ']');
-            const v = el && el.getAttribute(a);
-            if (looksLikeId(v)) return v;
-        }
-        // 链接兜底：/a/chat/s/<id>
-        const link = row.querySelector && row.querySelector('a[href]');
-        if (link) {
-            const m = String(link.getAttribute('href') || '').match(/\/s\/([A-Za-z0-9_-]{8,})/);
-            if (m) return m[1];
-        }
-        // 当前打开的会话
-        if (row.matches && row.matches('[aria-current="page"], [class*="active"], [class*="selected"]')) {
-            return currentSessionId();
-        }
-        return null;
-    }
-
-    // 侧边栏行：窄 + 位于左半屏
     function isSidebarRow(el) {
         if (el.closest('[class*="chat-message"], [class*="message-list"], [class*="markdown"]')) return false;
         const rect = el.getBoundingClientRect();
-        if (!rect.width || !rect.height) return false;
+        if (!rect.width || !rect.height) return false;     // 已隐藏的行自动排除
         if (rect.width > 420 || rect.height > 120) return false;
         return rect.left < window.innerWidth / 2;
     }
@@ -103,34 +79,71 @@
     function collectRows() {
         const set = new Set();
 
-        // 1) 虚拟列表项（DeepSeek 侧边栏就是虚拟列表）
-        document.querySelectorAll('[data-virtual-list-item-key]').forEach((el) => {
+        document.querySelectorAll(ROW_SELECTOR).forEach((el) => {
             if (isSidebarRow(el)) set.add(el);
         });
 
-        // 2) 兜底：任何带会话 id 属性的最内层元素
+        // 兜底：带会话 id 属性的元素（结构改版时仍有救）
         document.querySelectorAll(ID_SELECTOR).forEach((el) => {
             if (el.querySelector(ID_SELECTOR)) return;
-            if (el.closest('[data-virtual-list-item-key]')) return;  // 已被 1) 覆盖
+            if (el.closest(ROW_SELECTOR)) return;
             if (isSidebarRow(el)) set.add(el);
         });
 
         return [...set];
     }
 
+    function getSessionId(row) {
+        // 1) 链接里的 uuid —— 实测最可靠
+        const href = row.getAttribute && row.getAttribute('href');
+        if (href) {
+            const m = href.match(/\/a\/chat\/s\/([A-Za-z0-9_-]{8,})/);
+            if (m) return m[1];
+        }
+        const link = row.querySelector && row.querySelector(ROW_SELECTOR);
+        if (link) {
+            const m = String(link.getAttribute('href') || '').match(/\/a\/chat\/s\/([A-Za-z0-9_-]{8,})/);
+            if (m) return m[1];
+        }
+        // 2) 属性兜底
+        for (const a of ID_ATTRS) {
+            const v = row.getAttribute && row.getAttribute(a);
+            if (v && /^[A-Za-z0-9_-]{8,}$/.test(v)) return v;
+        }
+        for (const a of ID_ATTRS) {
+            const el = row.querySelector && row.querySelector('[' + a + ']');
+            const v = el && el.getAttribute(a);
+            if (v && /^[A-Za-z0-9_-]{8,}$/.test(v)) return v;
+        }
+        // 3) 当前打开的会话
+        if (row.matches && row.matches('[aria-current="page"], [class*="active"], [class*="selected"]')) {
+            const m = location.pathname.match(/\/s\/([A-Za-z0-9_-]{8,})/);
+            if (m) return m[1];
+        }
+        return null;
+    }
+
     // ========== 删除 ==========
     async function deleteSessions(ids) {
+        const token = getToken();
+        if (!token) {
+            log('未取到 userToken，可能未登录');
+            return false;
+        }
         try {
             const res = await fetch(DELETE_API, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
                 credentials: 'include',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'authorization': 'Bearer ' + token
+                },
                 body: JSON.stringify({ chat_session_ids: ids })
             });
             const data = await res.json().catch(() => ({}));
             const bizCode = data && data.data ? data.data.biz_code : undefined;
             const ok = res.ok
-                && (data.code === 0 || data.code === undefined)
+                && data.code === 0
                 && (bizCode === 0 || bizCode === undefined);
             log('删除结果:', res.status, JSON.stringify(data).substring(0, 160));
             return ok;
@@ -144,13 +157,14 @@
     function initHoverDelete() {
         const style = document.createElement('style');
         style.textContent = `
-            .ds-conv-row { position: relative !important; }
+            /* 三点菜单按钮是绝对定位（right:4px, 宽 28），我们的按钮同样绝对定位到它左侧 */
             .ds-del-btn {
                 display: none;
-                position: absolute; right: 30px; top: 50%;
+                position: absolute;
+                right: 34px; top: 50%;
                 transform: translateY(-50%);
                 align-items: center; justify-content: center;
-                width: 20px; height: 20px; padding: 0;
+                width: 22px; height: 22px; padding: 0;
                 border: none; border-radius: 4px;
                 background: transparent; color: #999;
                 font-size: 15px; line-height: 1; cursor: pointer;
@@ -163,16 +177,25 @@
 
         const injectAll = () => {
             for (const row of collectRows()) {
-                if (row.dataset.__dsInjected) continue;
-                row.dataset.__dsInjected = '1';
-                row.classList.add('ds-conv-row');
+                if (row.querySelector('.ds-del-btn')) continue;   // 已注入（含被 React 重建后补注入）
 
                 const btn = document.createElement('button');
                 btn.className = 'ds-del-btn';
                 btn.textContent = '×';
                 btn.title = '删除会话';
+                row.classList.add('ds-conv-row');
 
-                // 捕获阶段拦截，避免触发会话项的下拉菜单 / 跳转
+                // 优先塞进右侧操作区（跟随其 hover 显隐），否则挂到行上
+                const menuBtns = row.querySelectorAll('[role="button"]');
+                const menu = menuBtns.length ? menuBtns[menuBtns.length - 1] : null;
+
+                if (menu && menu.parentElement) {
+                    menu.parentElement.appendChild(btn);
+                } else {
+                    row.appendChild(btn);
+                }
+
+                // 捕获阶段拦截，阻止链接跳转 / 三点菜单弹出
                 ['pointerdown', 'mousedown', 'mouseup', 'click', 'dblclick'].forEach((type) => {
                     btn.addEventListener(type, (e) => {
                         e.stopPropagation();
@@ -181,8 +204,6 @@
                         if (type === 'click') handleDeleteClick(row, btn);
                     }, true);
                 });
-
-                row.appendChild(btn);
             }
         };
 
@@ -208,7 +229,7 @@
         row.style.opacity = '0.4';
         const ok = await deleteSessions([id]);
         if (ok) {
-            row.remove();
+            row.style.display = 'none';   // 不 remove，避免 React 卸载时报错
             showToast('已删除');
         } else {
             row.style.opacity = '';
@@ -528,7 +549,7 @@
                     break;
                 }
 
-                row.remove();
+                row.style.display = 'none';
                 done++;
                 setStatus(`已删除 ${done}/${limit}`);
 
@@ -556,14 +577,15 @@
             const rows = collectRows();
             console.table(rows.map((el, i) => ({
                 '#': i,
+                tag: el.tagName,
                 class: String(el.className || '').substring(0, 40),
                 id: getSessionId(el),
-                attrs: [...el.attributes].map((a) => a.name).join(','),
+                href: (el.getAttribute && el.getAttribute('href') || '').substring(0, 40),
                 text: (el.innerText || '').replace(/\s+/g, ' ').substring(0, 30)
             })));
             console.log('[DeepSeek助手] 识别行数:', rows.length,
-                '| 虚拟列表项:', document.querySelectorAll('[data-virtual-list-item-key]').length,
-                '| 带 id 节点:', document.querySelectorAll(ID_SELECTOR).length);
+                '| 登录:', !!getToken(),
+                '| 链接总数:', document.querySelectorAll(ROW_SELECTOR).length);
             return rows.length;
         };
     }
@@ -572,7 +594,7 @@
     function bootstrap() {
         if (window.__deepseekHelperLoaded) return;
         window.__deepseekHelperLoaded = true;
-        console.log('[DeepSeek助手] v1.0.0 已加载');
+        console.log('[DeepSeek助手] v1.1.0 已加载');
 
         initHoverDelete();
         initCopyOnDblclick();
