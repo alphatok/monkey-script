@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         元宝助手 - Yuanbao Helper
 // @namespace    http://tampermonkey.net/
-// @version      1.4.0
+// @version      1.4.1
 // @description  腾讯元宝聊天页面增强：快捷键发送、自动聚焦、界面精简、会话一键删除
 // @author       You
 // @match        https://yuanbao.tencent.com/chat/*
@@ -59,6 +59,10 @@
     // ========== 功能 2：自动聚焦输入框 ==========
     function initAutoFocus() {
         const tryFocus = () => {
+            // 用户正在操作悬浮面板时不要抢焦点
+            const active = document.activeElement;
+            if (active && active.closest && active.closest('.yh-batch')) return;
+
             const input = findInputBox();
             if (input && document.activeElement !== input) {
                 input.focus();
@@ -395,20 +399,32 @@
         }
     }
 
+    // 关键词状态：on=false 表示暂时不参与匹配；全部关键词为 AND 关系
+    const batchKeywords = [
+        { text: '科技', on: true },
+        { text: '摘要', on: true }
+    ];
+
     function getBatchKeywords() {
-        if (!batchRoot) return [];
-        return [...batchRoot.querySelectorAll('input[type="checkbox"]')]
-            .filter((cb) => cb.checked)
-            .map((cb) => cb.dataset.kw);
+        return batchKeywords.filter((k) => k.on).map((k) => k.text);
     }
 
-    // 命中规则：会话行文本同时包含所有勾选的关键词（科技 / 摘要 / 或标签 chip 文本）
+    function addBatchKeyword(text) {
+        const t = String(text || '').trim();
+        if (!t) return false;
+        if (batchKeywords.some((k) => k.text === t)) return false;
+        batchKeywords.push({ text: t, on: true });
+        return true;
+    }
+
+    // 命中规则：会话行文本同时包含所有启用中的关键词（AND）
     function findBatchTargets() {
-        const kws = getBatchKeywords();
+        const kws = getBatchKeywords().map((k) => k.toLowerCase());
         if (!kws.length) return [];
         const out = [];
         for (const item of collectConvItems()) {
-            const text = (item.innerText || item.textContent || '').replace(/\s+/g, '');
+            const text = (item.innerText || item.textContent || '')
+                .replace(/\s+/g, '').toLowerCase();
             if (kws.every((k) => text.includes(k))) out.push(item);
         }
         return out;
@@ -466,6 +482,42 @@
             }
             .yh-batch-row input[type="number"]:focus { border-color: #07c160; }
 
+            .yh-kw-list {
+                display: flex; flex-wrap: wrap; gap: 5px;
+                margin: 2px 0 8px;
+            }
+            .yh-kw-chip {
+                display: inline-flex; align-items: center; gap: 2px;
+                padding: 2px 3px 2px 8px; border-radius: 11px;
+                background: #e8f8ef; color: #07a352;
+                border: 1px solid #b7e6cc;
+                font-size: 12px; line-height: 1.5;
+                cursor: pointer; user-select: none;
+            }
+            .yh-kw-chip.off {
+                background: #f4f4f4; color: #aaa; border-color: #e2e2e2;
+                text-decoration: line-through;
+            }
+            .yh-kw-del {
+                width: 15px; height: 15px; padding: 0; line-height: 1;
+                border: none; background: transparent; color: inherit;
+                font-size: 13px; cursor: pointer; border-radius: 50%;
+                opacity: 0.6;
+            }
+            .yh-kw-del:hover { background: rgba(0,0,0,0.08); opacity: 1; }
+
+            .yh-kw-input {
+                flex: 1; min-width: 0; padding: 3px 6px; font-size: 12px;
+                border: 1px solid #ddd; border-radius: 4px; outline: none;
+            }
+            .yh-kw-input:focus { border-color: #07c160; }
+            .yh-kw-add {
+                flex-shrink: 0; padding: 3px 8px; font-size: 12px;
+                border: 1px solid #07c160; background: #fff; color: #07c160;
+                border-radius: 4px; cursor: pointer;
+            }
+            .yh-kw-add:hover { background: #07c160; color: #fff; }
+
             .yh-batch-status {
                 margin: 8px 0; padding: 6px 8px; font-size: 12px;
                 background: #f6f6f6; border-radius: 5px; color: #666;
@@ -491,9 +543,10 @@
                     <span>批量删除会话</span>
                     <button class="yh-batch-x" title="最小化">×</button>
                 </div>
+                <div class="yh-kw-list"></div>
                 <div class="yh-batch-row">
-                    <label><input type="checkbox" data-kw="科技" checked> 科技</label>
-                    <label><input type="checkbox" data-kw="摘要" checked> 摘要</label>
+                    <input type="text" class="yh-kw-input" placeholder="添加关键词，回车确认">
+                    <button class="yh-kw-add">添加</button>
                 </div>
                 <div class="yh-batch-row">
                     <span>最近</span>
@@ -535,6 +588,68 @@
             setStatus(`匹配 ${targets.length} 个会话`, tip);
         };
 
+        const kwListEl = root.querySelector('.yh-kw-list');
+        const kwInputEl = root.querySelector('.yh-kw-input');
+        const kwAddEl = root.querySelector('.yh-kw-add');
+
+        const renderKeywords = () => {
+            kwListEl.innerHTML = '';
+            for (const kw of batchKeywords) {
+                const chip = document.createElement('span');
+                chip.className = 'yh-kw-chip' + (kw.on ? '' : ' off');
+                chip.title = kw.on ? '点击停用' : '点击启用';
+
+                const text = document.createElement('span');
+                text.textContent = kw.text;
+                chip.appendChild(text);
+
+                const del = document.createElement('button');
+                del.className = 'yh-kw-del';
+                del.textContent = '×';
+                del.title = '移除关键词';
+                chip.appendChild(del);
+
+                // 点词体：切换启用状态；点 ×：移除（都不冒泡到面板外）
+                chip.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    if (e.target === del) {
+                        const i = batchKeywords.indexOf(kw);
+                        if (i >= 0) batchKeywords.splice(i, 1);
+                    } else {
+                        kw.on = !kw.on;
+                    }
+                    renderKeywords();
+                    refresh();
+                });
+
+                kwListEl.appendChild(chip);
+            }
+        };
+
+        const submitKeyword = () => {
+            const v = kwInputEl.value;
+            if (!addBatchKeyword(v)) {
+                if (v.trim()) showToast('关键词已存在');
+                return;
+            }
+            kwInputEl.value = '';
+            renderKeywords();
+            refresh();
+        };
+
+        kwAddEl.addEventListener('click', (e) => {
+            e.stopPropagation();
+            submitKeyword();
+        });
+        kwInputEl.addEventListener('keydown', (e) => {
+            // 拦住回车，避免触发页面全局的 Enter 发送逻辑
+            e.stopPropagation();
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                submitKeyword();
+            }
+        });
+
         root.addEventListener('mouseenter', () => root.classList.add('yh-batch--open'));
         root.addEventListener('mouseleave', () => {
             if (batchState.running) return;
@@ -545,9 +660,6 @@
             root.classList.remove('yh-batch--open');
         });
 
-        root.querySelectorAll('input[type="checkbox"]').forEach((cb) => {
-            cb.addEventListener('change', refresh);
-        });
         [limitEl, minEl, maxEl].forEach((el) => el.addEventListener('change', refresh));
 
         runBtn.addEventListener('click', () => {
@@ -567,6 +679,7 @@
             requestAnimationFrame(() => { pending = false; refresh(); });
         }).observe(document.body, { childList: true, subtree: true });
 
+        renderKeywords();
         refresh();
         log('批量删除面板已启用');
     }
@@ -645,7 +758,7 @@
 
     function showLoadedBadge() {
         const badge = document.createElement('div');
-        badge.textContent = '元宝助手 v1.4.0';
+        badge.textContent = '元宝助手 v1.4.1';
         badge.style.cssText = `
             position: fixed; bottom: 12px; left: 12px; background: #07c160;
             color: #fff; padding: 4px 10px; border-radius: 4px; font-size: 12px;
@@ -661,7 +774,7 @@
         if (window.__yuanbaoHelperLoaded) return;
         window.__yuanbaoHelperLoaded = true;
 
-        console.log('[元宝助手] v1.4.0 已加载');
+        console.log('[元宝助手] v1.4.1 已加载');
 
         initShortcutSend();
         initAutoFocus();
