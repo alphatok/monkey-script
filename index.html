@@ -140,6 +140,8 @@
         <div class="feature">页面加载后自动聚焦输入框</div>
         <div class="feature">自动隐藏底部下载横幅</div>
         <div class="feature">双击聊天消息复制内容</div>
+        <div class="feature">默认进入临时会话（可手动取消）</div>
+        <div class="feature">会话列表悬停显示 × ，点击直接删除</div>
 
         <div class="section-title">安装步骤</div>
 
@@ -187,9 +189,18 @@
             安装到 Tampermonkey
         </a>
 
+        <p style="margin-top:14px;font-size:13px;color:#888;text-align:center;line-height:1.7;">
+            按钮打不开？改用在线地址安装（不需要本地服务器）：<br>
+            <a href="https://raw.githubusercontent.com/alphatok/monkey-script/main/yuanbao-helper.user.js"
+               style="color:#07c160;">raw.githubusercontent.com/.../yuanbao-helper.user.js</a>
+        </p>
+
         <div id="local-warning" class="warning">
             <strong>⚠️ 检测到本地文件打开</strong><br>
-            由于浏览器安全限制，Tampermonkey 无法直接处理 <code>file://</code> 协议的脚本文件。请按 Step 2 开启"允许访问文件网址"权限后刷新本页，或者运行 <code>python3 serve.py</code> 启动本地服务器后通过 <code>http://localhost:8080</code> 访问。
+            浏览器安全限制导致 <code>file://</code> 下的脚本无法被 Tampermonkey 处理。二选一：<br>
+            • 按 Step 2 开启<strong>"允许访问文件网址"</strong>后刷新本页；<br>
+            • 或在脚本目录运行 <code>python3 serve.py</code>，再访问 <code>http://localhost:8080/index.html</code>；<br>
+            • 或直接用上面的 <strong>GitHub 在线地址</strong>安装。
         </div>
     </div>
 
