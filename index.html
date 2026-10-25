@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>元宝助手 - 安装</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #f5f5f5;
+            display: flex;
+            justify-content: center;
+            align-items: flex-start;
+            min-height: 100vh;
+            padding: 40px 20px;
+        }
+        .card {
+            background: #fff;
+            border-radius: 12px;
+            padding: 36px;
+            max-width: 520px;
+            width: 100%;
+            box-shadow: 0 2px 12px rgba(0,0,0,0.08);
+        }
+        h1 { font-size: 24px; margin-bottom: 6px; }
+        .subtitle { color: #888; margin-bottom: 24px; font-size: 14px; }
+
+        .feature {
+            display: flex;
+            align-items: center;
+            padding: 10px 0;
+            border-bottom: 1px solid #f0f0f0;
+            font-size: 14px;
+            color: #333;
+        }
+        .feature:last-child { border-bottom: none; }
+        .feature::before {
+            content: '';
+            display: inline-block;
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: #07c160;
+            margin-right: 12px;
+            flex-shrink: 0;
+        }
+
+        .section-title {
+            font-size: 15px;
+            font-weight: 600;
+            color: #333;
+            margin: 28px 0 12px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid #eee;
+        }
+
+        .step {
+            display: flex;
+            gap: 12px;
+            margin: 14px 0;
+            font-size: 13px;
+            line-height: 1.8;
+            color: #444;
+        }
+        .step-num {
+            flex-shrink: 0;
+            width: 24px;
+            height: 24px;
+            line-height: 24px;
+            text-align: center;
+            background: #07c160;
+            color: #fff;
+            border-radius: 50%;
+            font-size: 12px;
+            font-weight: 600;
+            margin-top: 2px;
+        }
+        .step-body { flex: 1; }
+        .step-body code {
+            background: #f5f5f5;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 12px;
+            color: #d46b08;
+        }
+        .step-body a { color: #07c160; }
+        .step-body strong { color: #222; }
+
+        .install-btn {
+            display: block;
+            width: 100%;
+            padding: 14px;
+            margin-top: 24px;
+            background: #07c160;
+            color: #fff;
+            text-align: center;
+            text-decoration: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 500;
+            transition: background 0.2s;
+        }
+        .install-btn:hover { background: #06ad56; }
+        .install-btn.disabled {
+            background: #ccc;
+            pointer-events: none;
+        }
+
+        .warning {
+            display: none;
+            background: #fff7e6;
+            border: 1px solid #ffd591;
+            border-radius: 8px;
+            padding: 14px;
+            margin-top: 16px;
+            font-size: 13px;
+            line-height: 1.7;
+            color: #5a3f00;
+        }
+        .warning.show { display: block; }
+        .warning strong { color: #d46b08; }
+        .warning code {
+            background: #fff;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 12px;
+            border: 1px solid #ffd591;
+        }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>元宝助手</h1>
+        <p class="subtitle">腾讯元宝聊天页面增强工具</p>
+
+        <div class="feature">Enter 发送消息，Shift+Enter 换行</div>
+        <div class="feature">页面加载后自动聚焦输入框</div>
+        <div class="feature">自动隐藏底部下载横幅</div>
+        <div class="feature">双击聊天消息复制内容</div>
+
+        <div class="section-title">安装步骤</div>
+
+        <div class="step">
+            <div class="step-num">1</div>
+            <div class="step-body">
+                <strong>安装 Tampermonkey 扩展</strong><br>
+                如果未安装，先去
+                <a href="https://chrome.google.com/webstore/detail/tampermonkey/dhdgffkkebhmkfjojejmpbldmpobfkfo" target="_blank">Chrome 商店</a>
+                或
+                <a href="https://addons.mozilla.org/firefox/addon/tampermonkey/" target="_blank">Firefox 商店</a>
+                安装。安装后浏览器右上角会出现 Tampermonkey 图标。
+            </div>
+        </div>
+
+        <div class="step">
+            <div class="step-num">2</div>
+            <div class="step-body">
+                <strong>开启必要权限</strong><br>
+                在浏览器地址栏输入 <code>chrome://extensions</code>（Firefox 输入 <code>about:addons</code>）→ 找到 <strong>Tampermonkey</strong> → 点击<strong>"详情"</strong> → 打开以下两个开关：
+                <br>• <strong>允许访问文件网址</strong>（本地打开时需要）
+                <br>• <strong>允许读取和更改网站数据</strong> → 选择<strong>"在所有网站上"</strong>
+            </div>
+        </div>
+
+        <div class="step">
+            <div class="step-num">3</div>
+            <div class="step-body">
+                <strong>点击下面的按钮安装脚本</strong><br>
+                如果 Tampermonkey 正常工作，会弹出一个确认窗口，显示脚本内容，点击<strong>"安装"</strong>即可。
+            </div>
+        </div>
+
+        <div class="step">
+            <div class="step-num">4</div>
+            <div class="step-body">
+                <strong>验证安装</strong><br>
+                访问
+                <a href="https://yuanbao.tencent.com/chat/" target="_blank">https://yuanbao.tencent.com/chat/</a>
+                ，在输入框按 Enter 测试是否能发送消息。
+            </div>
+        </div>
+
+        <a class="install-btn" id="install-btn" href="./yuanbao-helper.user.js">
+            安装到 Tampermonkey
+        </a>
+
+        <div id="local-warning" class="warning">
+            <strong>⚠️ 检测到本地文件打开</strong><br>
+            由于浏览器安全限制，Tampermonkey 无法直接处理 <code>file://</code> 协议的脚本文件。请按 Step 2 开启"允许访问文件网址"权限后刷新本页，或者运行 <code>python3 serve.py</code> 启动本地服务器后通过 <code>http://localhost:8080</code> 访问。
+        </div>
+    </div>
+
+    <script>
+        if (location.protocol === 'file:') {
+            document.getElementById('local-warning').classList.add('show');
+        }
+    </script>
+</body>
+</html>
