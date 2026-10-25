@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         元宝助手 - Yuanbao Helper
 // @namespace    http://tampermonkey.net/
-// @version      1.1.2
+// @version      1.2.0
 // @description  腾讯元宝聊天页面增强：快捷键发送、自动聚焦、界面精简、会话快速删除
 // @author       You
 // @match        https://yuanbao.tencent.com/chat/*
@@ -35,12 +35,21 @@
     }
 
     function clickSendButton() {
+        // 支持中英文界面多种选择器
         const btn = document.querySelector('[aria-label="发送"]')
+            || document.querySelector('[aria-label="Send"]')
             || document.querySelector('button[class*="send"]')
-            || [...document.querySelectorAll('button')].find(b => b.textContent.includes('发送'));
-        if (btn && !btn.disabled) {
+            || document.querySelector('div[class*="SendButton"]')
+            || [...document.querySelectorAll('button, div[role="button"]')]
+                .find(b => {
+                    const aria = b.getAttribute('aria-label') || '';
+                    return aria.includes('发送') || aria.includes('Send');
+                });
+        if (btn) {
             btn.click();
             log('已触发发送');
+        } else {
+            log('未找到发送按钮');
         }
     }
 
@@ -96,14 +105,43 @@
         log('双击复制已启用');
     }
 
-    // ========== 功能 5：默认进入临时会话 ==========
+    // ========== 功能 5：默认进入临时会话（尊重用户手动取消） ==========
     function initAutoTempSession() {
+        const LS_KEY = 'yh_user_disabled_temp';
+
+        // 检测用户是否手动取消了 temp 模式
+        function detectUserCancelTemp() {
+            const url = new URL(location.href);
+            const wasTemp = sessionStorage.getItem('yh_last_was_temp') === '1';
+            const isTemp = url.searchParams.get('chatMode') === 'temp';
+
+            if (wasTemp && !isTemp) {
+                // 用户从 temp 模式切回了普通模式
+                localStorage.setItem(LS_KEY, '1');
+                log('检测到用户手动取消临时会话，已记住偏好');
+            }
+
+            sessionStorage.setItem('yh_last_was_temp', isTemp ? '1' : '0');
+        }
+
+        // 页面加载时检测一次
+        detectUserCancelTemp();
+
+        // 如果用户手动取消过，不再自动进入 temp
+        const userDisabled = localStorage.getItem(LS_KEY) === '1';
+        if (userDisabled) {
+            log('用户已手动取消临时会话，保持当前模式');
+        }
+
         const tryEnterTemp = () => {
+            if (userDisabled) return;
+
             const url = new URL(location.href);
             if (url.searchParams.get('chatMode') === 'temp') {
                 log('当前已是临时会话模式');
                 return;
             }
+
             const tempBtn = document.querySelector('[aria-label="Enter Temporary Chat"]');
             if (tempBtn) {
                 tempBtn.click();
@@ -111,22 +149,29 @@
                 return;
             }
         };
+
+        // 首次进入时延迟尝试
         setTimeout(tryEnterTemp, 1000);
 
+        // 监听 URL 变化
         let lastUrl = location.href;
         const urlObserver = new MutationObserver(() => {
             if (location.href !== lastUrl) {
                 lastUrl = location.href;
+                detectUserCancelTemp();
                 setTimeout(tryEnterTemp, 500);
             }
         });
         urlObserver.observe(document.body, { childList: true, subtree: true });
 
-        // 拦截新建对话，改为临时模式
+        // 拦截新建对话，改为临时模式（仅当用户未手动取消时）
         document.addEventListener('click', (e) => {
+            if (localStorage.getItem(LS_KEY) === '1') return;
+
             const target = e.target.closest('.yb-new-chat-entry__item')
                 || e.target.closest('[aria-label="New Chat"]');
             if (!target) return;
+
             const url = new URL(location.href);
             if (url.searchParams.get('chatMode') !== 'temp') {
                 log('拦截新建对话，改为临时会话模式');
@@ -137,12 +182,11 @@
             }
         }, true);
 
-        log('自动进入临时会话已启用');
+        log('自动进入临时会话已启用（尊重用户手动取消）');
     }
 
     // ========== 功能 6：会话列表注入删除按钮 ==========
     function initHoverDelete() {
-        // 注入 CSS：确保我们的删除按钮不影响原有按钮
         const style = document.createElement('style');
         style.textContent = `
             .yh-conv-item {
@@ -184,17 +228,13 @@
                 item.dataset.__yhDeleteInjected = '1';
                 item.classList.add('yh-conv-item');
 
-                // 创建删除按钮
                 const delBtn = document.createElement('button');
                 delBtn.className = 'yh-delete-btn';
                 delBtn.textContent = '×';
                 delBtn.title = '删除会话';
 
-                // 找到会话项内的 flex 容器（通常是包含标题和三个点按钮的容器）
                 const insertTarget = findInsertTarget(item);
                 if (insertTarget) {
-                    // 插入到末尾（原有"三个点"按钮之前或之后）
-                    // 策略：找到最后一个子元素，如果它是操作按钮，插在它前面
                     const lastChild = insertTarget.lastElementChild;
                     if (lastChild && (
                         lastChild.className?.includes('more') ||
@@ -224,12 +264,10 @@
     }
 
     function findInsertTarget(item) {
-        // 尝试找到 flex 布局的容器（通常是标题+按钮的包装器）
         const flexContainers = item.querySelectorAll('*');
         for (const el of flexContainers) {
             const style = window.getComputedStyle(el);
             if (style.display === 'flex' || style.display === 'inline-flex') {
-                // 确保这个容器包含文本内容和按钮
                 const hasText = Array.from(el.children).some(c => c.textContent.trim().length > 0);
                 const hasButton = el.querySelector('button, [role="button"], svg');
                 if (hasText && hasButton) {
@@ -248,7 +286,7 @@
             return;
         }
 
-        // 步骤 1：注入 CSS 隐藏菜单视觉，让用户看不到下拉框
+        // 注入 CSS 隐藏菜单视觉
         const hideStyleId = 'yh-hide-menu-' + Date.now();
         const hideStyle = document.createElement('style');
         hideStyle.id = hideStyleId;
@@ -256,74 +294,37 @@
             [class*="menu"], [class*="dropdown"], [class*="popup"], [class*="t-popup"],
             [class*="t-dropdown"], [class*="t-tooltip"] {
                 opacity: 0 !important;
+                pointer-events: auto !important;
             }
         `;
         document.head.appendChild(hideStyle);
 
-        // 步骤 2：触发 mouseenter 让操作按钮显示
+        // 触发 mouseenter 让"三个点"按钮显示
         item.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true, cancelable: true }));
 
-        // 步骤 3：找"三个点"按钮
+        // 找到"三个点"按钮
         const moreBtn = findMoreButton(item);
         if (!moreBtn) {
             log('未找到"三个点"按钮');
-            document.head.removeChild(hideStyle);
+            cleanupHideStyle(hideStyleId);
             return;
         }
 
-        log('找到"三个点"按钮');
+        log('找到"三个点"按钮，准备打开菜单');
 
-        // 步骤 4：触发 mouseenter 让按钮可见，然后点击打开菜单
+        // 触发 mouseenter 让按钮可见
         moreBtn.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true, cancelable: true }));
 
-        // 步骤 5：用 MutationObserver 监听菜单创建，出现后立刻点击删除
-        let menuClicked = false;
-        const menuObserver = new MutationObserver((mutations) => {
-            if (menuClicked) return;
-
-            for (const mutation of mutations) {
-                for (const node of mutation.addedNodes) {
-                    if (node.nodeType !== 1) continue;
-
-                    // 检查这个节点或其子节点是否包含"删除"
-                    const deleteEl = node.textContent?.includes('删除') || node.textContent?.includes('Delete')
-                        ? findDeleteButtonInNode(node)
-                        : null;
-
-                    if (deleteEl) {
-                        menuClicked = true;
-                        deleteEl.click();
-                        log('已极速点击菜单中的删除选项');
-
-                        // 清理：移除隐藏 CSS
-                        setTimeout(() => {
-                            const s = document.getElementById(hideStyleId);
-                            if (s) document.head.removeChild(s);
-                        }, 300);
-
-                        menuObserver.disconnect();
-                        return;
-                    }
-                }
-            }
-        });
-
-        menuObserver.observe(document.body, { childList: true, subtree: true });
-
-        // 步骤 6：点击"三个点"打开菜单
+        // 点击打开菜单（菜单已隐藏，用户看不到）
         setTimeout(() => {
             moreBtn.click();
-            log('已点击"三个点"打开菜单');
+            log('已打开菜单');
 
-            // 兜底：如果 MutationObserver 没捕获到，用传统方式
+            // 等待菜单渲染后点击删除
             setTimeout(() => {
-                if (!menuClicked) {
-                    clickDeleteInMenuFallback();
-                    const s = document.getElementById(hideStyleId);
-                    if (s) document.head.removeChild(s);
-                    menuObserver.disconnect();
-                }
-            }, 250);
+                clickDeleteInMenu();
+                cleanupHideStyle(hideStyleId);
+            }, 80);
         }, 30);
     }
 
@@ -344,35 +345,29 @@
         return null;
     }
 
-    function findDeleteButtonInNode(node) {
-        const btn = node.querySelector('button, [role="button"]');
-        if (btn && (btn.textContent?.trim() === '删除' || btn.textContent?.trim() === 'Delete')) {
-            return btn;
-        }
-        const all = node.querySelectorAll('*');
-        for (const el of all) {
-            const t = el.textContent?.trim();
-            if (t === '删除' || t === 'Delete') {
-                return el;
-            }
-        }
-        return null;
-    }
-
-    function clickDeleteInMenuFallback() {
-        const allEls = document.querySelectorAll('*');
-        for (const el of allEls) {
+    function clickDeleteInMenu() {
+        // 在页面中查找"删除"选项（菜单已打开但不可见）
+        const candidates = document.querySelectorAll('button, div[role="button"], li, [class*="menu"] *, [class*="dropdown"] *');
+        for (const el of candidates) {
             const text = el.textContent?.trim();
             if (text === '删除' || text === 'Delete') {
                 const rect = el.getBoundingClientRect();
                 if (rect.width > 0 && rect.height > 0) {
                     el.click();
-                    log('兜底：已点击菜单中的删除选项');
-                    return;
+                    log('已点击菜单中的删除选项');
+                    return true;
                 }
             }
         }
-        log('兜底：未找到删除选项');
+        log('未找到菜单中的删除选项');
+        return false;
+    }
+
+    function cleanupHideStyle(id) {
+        setTimeout(() => {
+            const s = document.getElementById(id);
+            if (s) document.head.removeChild(s);
+        }, 300);
     }
 
     function isProtectedSession(item) {
@@ -499,7 +494,7 @@
         if (window.__yuanbaoHelperLoaded) return;
         window.__yuanbaoHelperLoaded = true;
 
-        console.log('[元宝助手] v1.1.2 已加载');
+        console.log('[元宝助手] v1.2.0 已加载');
 
         initShortcutSend();
         initAutoFocus();
