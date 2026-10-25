@@ -1,2 +1,4 @@
 .playwright-cli/
 current.yml
+__pycache__/
+*.pyc
