@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         元宝助手 - Yuanbao Helper
 // @namespace    http://tampermonkey.net/
-// @version      1.1.0
+// @version      1.1.1
 // @description  腾讯元宝聊天页面增强：快捷键发送、自动聚焦、界面精简、会话快速删除
 // @author       You
 // @match        https://yuanbao.tencent.com/chat/*
@@ -13,7 +13,7 @@
 (function () {
     'use strict';
 
-    const DEBUG = false;
+    const DEBUG = true; // 调试模式，可在控制台查看日志
     const log = (...args) => DEBUG && console.log('[元宝助手]', ...args);
 
     // 保护新建会话：记录新建时间
@@ -77,7 +77,7 @@
             || document.querySelector('[class*="input"] textarea');
     }
 
-    // ========== 功能 3：精简界面（隐藏下载提示） ==========
+    // ========== 功能 3：精简界面 ==========
     function initCleanUI() {
         const style = document.createElement('style');
         style.textContent = `
@@ -110,70 +110,85 @@
         log('双击复制已启用');
     }
 
-    // ========== 功能 5：默认勾选"临时会话" ==========
+    // ========== 功能 5：默认进入临时会话模式 ==========
     function initAutoTempSession() {
-        const observer = new MutationObserver(() => {
-            // 策略1：通过文字内容查找复选框
-            const labels = document.querySelectorAll('label, span, div');
-            for (const el of labels) {
-                if (el.textContent.includes('临时会话') || el.textContent.includes('临时')) {
-                    const checkbox = el.closest('label')?.querySelector('input[type="checkbox"]')
-                        || el.parentElement?.querySelector('input[type="checkbox"]')
-                        || el.querySelector('input[type="checkbox"]');
-                    if (checkbox && !checkbox.checked) {
-                        checkbox.click();
-                        log('已自动勾选临时会话');
-                    }
-                }
+        // 策略1：如果当前不是临时会话模式，点击"进入临时会话"按钮
+        const tryEnterTemp = () => {
+            const url = new URL(location.href);
+            if (url.searchParams.get('chatMode') === 'temp') {
+                log('当前已是临时会话模式');
+                return;
             }
 
-            // 策略2：通过 aria-label 或 placeholder 查找
-            const inputs = document.querySelectorAll('input[type="checkbox"]');
-            for (const cb of inputs) {
-                const label = cb.closest('label');
-                if (label && (label.textContent.includes('临时') || label.textContent.includes('temp'))) {
-                    if (!cb.checked) {
-                        cb.click();
-                        log('已自动勾选临时会话 (策略2)');
-                    }
-                }
+            const tempBtn = document.querySelector('[aria-label="Enter Temporary Chat"]');
+            if (tempBtn) {
+                tempBtn.click();
+                log('已点击"进入临时会话"按钮');
+                return;
+            }
+
+            // 策略2：如果 URL 中没有 chatMode=temp，尝试自动添加
+            // 注意：这会刷新页面，谨慎使用
+            // url.searchParams.set('chatMode', 'temp');
+            // location.href = url.toString();
+        };
+
+        // 页面加载后尝试进入临时会话
+        setTimeout(tryEnterTemp, 1000);
+
+        // 监听 URL 变化（SPA 路由变化）
+        let lastUrl = location.href;
+        const urlObserver = new MutationObserver(() => {
+            if (location.href !== lastUrl) {
+                lastUrl = location.href;
+                log('URL 变化:', lastUrl);
+                setTimeout(tryEnterTemp, 500);
             }
         });
+        urlObserver.observe(document.body, { childList: true, subtree: true });
 
-        observer.observe(document.body, { childList: true, subtree: true });
-        log('自动勾选临时会话已启用');
+        // 拦截新建对话按钮点击，改为进入临时会话
+        document.addEventListener('click', (e) => {
+            const target = e.target.closest('.yb-new-chat-entry__item')
+                || e.target.closest('[aria-label="New Chat"]');
+            if (!target) return;
+
+            const url = new URL(location.href);
+            if (url.searchParams.get('chatMode') !== 'temp') {
+                log('拦截新建对话，改为临时会话模式');
+                e.preventDefault();
+                e.stopPropagation();
+                url.searchParams.set('chatMode', 'temp');
+                location.href = url.toString();
+            }
+        }, true);
+
+        log('自动进入临时会话模式已启用');
     }
 
     // ========== 功能 6：会话列表 hover 直接显示删除按钮 ==========
     function initHoverDelete() {
-        // 注入 CSS：让删除按钮/菜单始终可见
+        // 注入 CSS：强制显示操作按钮
         const style = document.createElement('style');
         style.textContent = `
-            /* 让会话项的操作按钮始终可见 */
-            [class*="session"] [class*="more"],
-            [class*="session"] [class*="action"],
-            [class*="conversation"] [class*="more"],
-            [class*="conversation"] [class*="action"],
-            [class*="chat-item"] [class*="more"],
-            [class*="list-item"] [class*="more"] {
+            /* 强制显示会话项的操作按钮 */
+            .yb-recent-conv-list > * [class*="more"],
+            .yb-recent-conv-list > * [class*="action"],
+            .yb-recent-conv-list > * [class*="menu"] {
                 opacity: 1 !important;
                 visibility: visible !important;
-                display: flex !important;
-            }
-
-            /* 删除按钮直接显示，不需要 hover */
-            [class*="session"]:hover [class*="delete"],
-            [class*="conversation"]:hover [class*="delete"],
-            [class*="chat-item"]:hover [class*="delete"] {
                 display: inline-flex !important;
             }
         `;
         document.head.appendChild(style);
 
-        // 同时用 JS 兜底：为每个会话项注入删除按钮
+        // 监听会话列表变化，为每个会话项注入删除按钮
         const observer = new MutationObserver(() => {
-            const sessionItems = findSessionItems();
-            for (const item of sessionItems) {
+            const convList = document.querySelector('.yb-recent-conv-list');
+            if (!convList) return;
+
+            const items = convList.children;
+            for (const item of items) {
                 if (item.dataset.__yhDeleteInjected) continue;
                 item.dataset.__yhDeleteInjected = '1';
 
@@ -182,63 +197,43 @@
                 delBtn.textContent = '×';
                 delBtn.title = '删除会话';
                 delBtn.style.cssText = `
-                    margin-left: 8px;
+                    position: absolute;
+                    right: 8px;
+                    top: 50%;
+                    transform: translateY(-50%);
                     background: transparent;
                     border: none;
                     color: #999;
                     cursor: pointer;
-                    font-size: 16px;
+                    font-size: 18px;
                     line-height: 1;
-                    padding: 0 4px;
-                    flex-shrink: 0;
+                    padding: 4px 8px;
+                    z-index: 10;
+                    opacity: 0;
+                    transition: opacity 0.2s, color 0.2s;
                 `;
-                delBtn.onmouseenter = () => { delBtn.style.color = '#ff4d4f'; };
-                delBtn.onmouseleave = () => { delBtn.style.color = '#999'; };
-                delBtn.onclick = (e) => {
+
+                // 悬浮时显示删除按钮
+                item.style.position = 'relative';
+                item.addEventListener('mouseenter', () => { delBtn.style.opacity = '1'; });
+                item.addEventListener('mouseleave', () => { delBtn.style.opacity = '0'; });
+                delBtn.addEventListener('mouseenter', () => { delBtn.style.color = '#ff4d4f'; });
+                delBtn.addEventListener('mouseleave', () => { delBtn.style.color = '#999'; });
+
+                delBtn.addEventListener('click', (e) => {
                     e.stopPropagation();
                     e.preventDefault();
                     deleteSession(item);
-                };
+                });
 
-                // 尝试插入到会话项末尾
-                const target = item.querySelector('[class*="title"]')
-                    || item.querySelector('[class*="name"]')
-                    || item;
-                if (target.style.display === 'flex' || getComputedStyle(target).display === 'flex') {
-                    target.appendChild(delBtn);
-                } else {
-                    // 如果目标不是 flex 容器，创建一个 flex 包装
-                    const wrapper = document.createElement('div');
-                    wrapper.style.cssText = 'display:flex;align-items:center;justify-content:space-between;width:100%;';
-                    while (target.firstChild) wrapper.appendChild(target.firstChild);
-                    wrapper.appendChild(delBtn);
-                    target.appendChild(wrapper);
-                }
+                item.appendChild(delBtn);
+                log('已为会话项注入删除按钮');
             }
         });
 
+        // 监听整个文档，等待会话列表出现
         observer.observe(document.body, { childList: true, subtree: true });
         log('hover 直接删除按钮已启用');
-    }
-
-    function findSessionItems() {
-        // 多种策略查找会话列表项
-        const selectors = [
-            '[class*="session-item"]',
-            '[class*="conversation-item"]',
-            '[class*="chat-item"]',
-            '[class*="list-item"]',
-            '[class*="session"]',
-            '[class*="conversation"]',
-        ];
-        for (const sel of selectors) {
-            const items = document.querySelectorAll(sel);
-            if (items.length > 0) {
-                log('找到会话项选择器:', sel, '数量:', items.length);
-                return Array.from(items);
-            }
-        }
-        return [];
     }
 
     function deleteSession(item) {
@@ -252,6 +247,7 @@
         // 策略1：查找已有的删除按钮/菜单并点击
         const existingDelete = item.querySelector('[class*="delete"]')
             || item.querySelector('[aria-label*="删除"]')
+            || item.querySelector('[aria-label*="Delete"]')
             || item.querySelector('button[title*="删除"]');
 
         if (existingDelete) {
@@ -263,15 +259,17 @@
         // 策略2：查找更多操作菜单（三个点）
         const moreBtn = item.querySelector('[class*="more"]')
             || item.querySelector('button[class*="menu"]')
-            || item.querySelector('[aria-label*="更多"]');
+            || item.querySelector('[aria-label*="更多"]')
+            || item.querySelector('[aria-label*="More"]');
 
         if (moreBtn) {
             moreBtn.click();
             // 菜单弹出后点击删除
             setTimeout(() => {
                 const menuDelete = document.querySelector('[class*="menu"] [class*="delete"]')
+                    || document.querySelector('[class*="dropdown"] [class*="delete"]')
                     || [...document.querySelectorAll('[class*="menu"] *, [class*="dropdown"] *')]
-                        .find(el => el.textContent.includes('删除'));
+                        .find(el => el.textContent.includes('删除') || el.textContent.includes('Delete'));
                 if (menuDelete) {
                     menuDelete.click();
                     log('通过菜单删除了会话');
@@ -280,23 +278,20 @@
             return;
         }
 
-        // 策略3：模拟右键菜单（部分网站支持）
+        // 策略3：模拟右键菜单
         const event = new MouseEvent('contextmenu', { bubbles: true });
         item.dispatchEvent(event);
         log('尝试右键菜单删除');
     }
 
     function isProtectedSession(item) {
-        // 保护最近新建的会话
         const now = Date.now();
         if (now - lastNewChatTime < NEW_CHAT_PROTECT_MS) {
-            // 检查是否是当前活跃会话（通常新建后会被选中）
+            // 检查是否是当前活跃会话
             const isActive = item.classList.contains('active')
                 || item.classList.contains('selected')
                 || item.getAttribute('aria-selected') === 'true'
-                || item.style.backgroundColor !== ''
-                || getComputedStyle(item).backgroundColor !== 'rgba(0, 0, 0, 0)'
-                && getComputedStyle(item).backgroundColor !== 'transparent';
+                || item.querySelector('[class*="active"]');
             if (isActive) {
                 log('当前活跃会话受保护');
                 return true;
@@ -328,11 +323,18 @@
                 for (const node of mutation.addedNodes) {
                     if (node.nodeType !== 1) continue;
                     const text = node.textContent || '';
-                    if (text.includes('删除') && text.includes('确认')) {
+                    if ((text.includes('删除') || text.includes('Delete')) &&
+                        (text.includes('确认') || text.includes('Confirm') || text.includes('确定'))) {
                         // 查找确认按钮并点击
                         const confirmBtn = node.querySelector('button[class*="primary"]')
                             || node.querySelector('button[class*="confirm"]')
-                            || [...node.querySelectorAll('button')].find(b => b.textContent.includes('确认') || b.textContent.includes('确定'));
+                            || node.querySelector('button[class*="danger"]')
+                            || [...node.querySelectorAll('button')].find(b =>
+                                b.textContent.includes('确认') ||
+                                b.textContent.includes('确定') ||
+                                b.textContent.includes('Confirm') ||
+                                b.textContent.includes('Delete')
+                            );
                         if (confirmBtn) {
                             setTimeout(() => confirmBtn.click(), 50);
                             log('自动点击确认按钮');
@@ -349,15 +351,15 @@
     // ========== 功能 8：监听新建对话，标记保护时间 ==========
     function initNewChatProtection() {
         document.addEventListener('click', (e) => {
-            const target = e.target.closest('button')
-                || e.target.closest('a')
-                || e.target.closest('[class*="new-chat"]')
-                || e.target.closest('[class*="new-conversation"]');
+            const target = e.target.closest('.yb-new-chat-entry__item')
+                || e.target.closest('[aria-label="New Chat"]')
+                || e.target.closest('button')
+                || e.target.closest('div[role="button"]');
 
             if (!target) return;
 
             const text = target.textContent || target.getAttribute('aria-label') || '';
-            if (text.includes('新建') || text.includes('New') || text.includes('新建对话')) {
+            if (text.includes('New Chat') || text.includes('新建') || text.includes('New')) {
                 lastNewChatTime = Date.now();
                 log('检测到新建对话，设置保护时间');
             }
@@ -413,7 +415,7 @@
         if (window.__yuanbaoHelperLoaded) return;
         window.__yuanbaoHelperLoaded = true;
 
-        console.log('[元宝助手] v1.1.0 已加载');
+        console.log('[元宝助手] v1.1.1 已加载');
 
         initShortcutSend();
         initAutoFocus();
