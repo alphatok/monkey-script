@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DeepSeek 助手 - DeepSeek Helper
 // @namespace    http://tampermonkey.net/
-// @version      1.1.0
+// @version      1.2.0
 // @description  DeepSeek 聊天页面增强：会话一键静默删除、多关键词批量删除、双击复制
 // @author       You
 // @match        https://chat.deepseek.com/*
@@ -57,14 +57,31 @@
     }
 
     function getToken() {
-        try {
-            const raw = localStorage.getItem('userToken');
+        const pick = (raw) => {
             if (!raw) return null;
-            const v = JSON.parse(raw);
-            return (v && v.value) || null;
-        } catch (e) {
-            return null;
-        }
+            if (raw.charAt(0) === '{') {
+                try {
+                    const j = JSON.parse(raw);
+                    if (j && j.value) return j.value;
+                } catch (e) { /* ignore */ }
+                return null;
+            }
+            return raw.length > 20 ? raw : null;
+        };
+
+        try {
+            const direct = pick(localStorage.getItem('userToken'));
+            if (direct) return direct;
+
+            // 兜底：扫其它带 token 的键（换登录方式时键名可能不同）
+            for (let i = 0; i < localStorage.length; i++) {
+                const k = localStorage.key(i);
+                if (!/token/i.test(k)) continue;
+                const v = pick(localStorage.getItem(k));
+                if (v) return v;
+            }
+        } catch (e) { /* ignore */ }
+        return null;
     }
 
     // ========== 会话行识别 ==========
@@ -157,7 +174,9 @@
     function initHoverDelete() {
         const style = document.createElement('style');
         style.textContent = `
-            /* 三点菜单按钮是绝对定位（right:4px, 宽 28），我们的按钮同样绝对定位到它左侧 */
+            /* 三点菜单按钮是绝对定位（right:4px, 宽 28），我们的按钮同样绝对定位到它左侧。
+               注意：不能用 .ds-conv-row 这类自己加的 class 做选择器 —— React 重渲染会把
+               className 覆盖回它自己的值，导致 hover 规则失效、X 永远不显示。 */
             .ds-del-btn {
                 display: none;
                 position: absolute;
@@ -171,7 +190,7 @@
                 z-index: 3;
             }
             .ds-del-btn:hover { color: #ff4d4f; background: rgba(255,77,79,0.12); }
-            .ds-conv-row:hover .ds-del-btn { display: flex; }
+            a[href*="/a/chat/s/"]:hover .ds-del-btn { display: flex; }
         `;
         document.head.appendChild(style);
 
@@ -183,7 +202,6 @@
                 btn.className = 'ds-del-btn';
                 btn.textContent = '×';
                 btn.title = '删除会话';
-                row.classList.add('ds-conv-row');
 
                 // 优先塞进右侧操作区（跟随其 hover 显隐），否则挂到行上
                 const menuBtns = row.querySelectorAll('[role="button"]');
@@ -225,14 +243,23 @@
             console.warn('[DeepSeek助手] 未取到会话 id，行 HTML：', row.outerHTML.substring(0, 800));
             return;
         }
+        if (!getToken()) {
+            showToast('未登录或 token 读取失败');
+            return;
+        }
+
+        // React 可能已把原来的 <a> 换掉，按 href 重新定位当前真实节点
+        const live = document.querySelector('a[href*="/a/chat/s/' + id + '"]') || row;
+
         btn.disabled = true;
-        row.style.opacity = '0.4';
+        live.style.opacity = '0.4';
         const ok = await deleteSessions([id]);
         if (ok) {
-            row.style.display = 'none';   // 不 remove，避免 React 卸载时报错
+            live.style.opacity = '';
+            live.style.display = 'none';   // 不 remove，避免 React 卸载时报错
             showToast('已删除');
         } else {
-            row.style.opacity = '';
+            live.style.opacity = '';
             btn.disabled = false;
             showToast('删除失败');
         }
@@ -549,7 +576,10 @@
                     break;
                 }
 
-                row.style.display = 'none';
+                // React 可能已替换节点，按 href 重新定位
+                const live = document.querySelector('a[href*="/a/chat/s/' + id + '"]') || row;
+                live.style.opacity = '';
+                live.style.display = 'none';
                 done++;
                 setStatus(`已删除 ${done}/${limit}`);
 
@@ -594,7 +624,7 @@
     function bootstrap() {
         if (window.__deepseekHelperLoaded) return;
         window.__deepseekHelperLoaded = true;
-        console.log('[DeepSeek助手] v1.1.0 已加载');
+        console.log('[DeepSeek助手] v1.2.0 已加载');
 
         initHoverDelete();
         initCopyOnDblclick();
