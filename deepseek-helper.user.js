@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DeepSeek 助手 - DeepSeek Helper
 // @namespace    http://tampermonkey.net/
-// @version      1.2.0
+// @version      1.2.1
 // @description  DeepSeek 聊天页面增强：会话一键静默删除、多关键词批量删除、双击复制
 // @author       You
 // @match        https://chat.deepseek.com/*
@@ -188,6 +188,9 @@
                 background: transparent; color: #999;
                 font-size: 15px; line-height: 1; cursor: pointer;
                 z-index: 3;
+                /* 关键：右侧操作区 _254829d 是 pointer-events:none，
+                   不显式打开的话真实鼠标点不到这个按钮 */
+                pointer-events: auto;
             }
             .ds-del-btn:hover { color: #ff4d4f; background: rgba(255,77,79,0.12); }
             a[href*="/a/chat/s/"]:hover .ds-del-btn { display: flex; }
@@ -624,7 +627,7 @@
     function bootstrap() {
         if (window.__deepseekHelperLoaded) return;
         window.__deepseekHelperLoaded = true;
-        console.log('[DeepSeek助手] v1.2.0 已加载');
+        console.log('[DeepSeek助手] v1.2.1 已加载');
 
         initHoverDelete();
         initCopyOnDblclick();
