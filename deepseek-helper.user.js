@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         DeepSeek 助手 - DeepSeek Helper
 // @namespace    http://tampermonkey.net/
-// @version      1.4.0
-// @description  DeepSeek 聊天页面增强：布局密度（默认/紧凑/宽松）、聊天区加宽、会话一键静默删除、多关键词批量删除、双击复制
+// @version      1.4.1
+// @description  DeepSeek 聊天页面增强：布局密度（默认/紧凑/宽松，侧栏与消息区一起变）、聊天区加宽、会话一键静默删除、多关键词批量删除、双击复制
 // @author       You
 // @match        https://chat.deepseek.com/*
 // @grant        none
@@ -326,6 +326,18 @@
         html.dsh-density-loose {
             --sider-width: 300px;
             --message-list-padding-horizontal: 56px;
+        }
+
+        /* 左侧会话列表：行高 40 → 32，侧栏内边距 12 → 8，跟着密度一起变 */
+        html.dsh-density-compact .b8812f16 { padding: 4px 8px 0; }
+        html.dsh-density-compact ._546d736 {
+            height: 32px; padding: 5px 6px 5px 8px; border-radius: 10px;
+        }
+        html.dsh-density-compact ._2afd28d { padding: 3px 2px 3px 4px; }
+
+        html.dsh-density-loose .b8812f16 { padding: 8px 16px 0; }
+        html.dsh-density-loose ._546d736 {
+            height: 46px; padding: 12px 6px 12px 10px;
         }
 
         /* 垂直节奏：站点正文是 16px/28px，段落间距 16px，紧凑档一起收一收 */
@@ -1022,7 +1034,7 @@
     function bootstrap() {
         if (window.__deepseekHelperLoaded) return;
         window.__deepseekHelperLoaded = true;
-        console.log('[DeepSeek助手] v1.4.0 已加载');
+        console.log('[DeepSeek助手] v1.4.1 已加载');
 
         initHoverDelete();
         initCopyOnDblclick();
