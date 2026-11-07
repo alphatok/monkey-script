@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         全局字体与文字颜色 - Global Font Helper
 // @namespace    http://tampermonkey.net/
-// @version      1.1.0
+// @version      1.1.1
 // @description  给所有网页统一设置字体与文字颜色：内置 8 套中英文友好字体栈（含 HarmonyOS Sans、MiSans、思源黑体、普惠体、霞鹜文楷），颜色默认 #0b214a，可在 Tampermonkey 菜单里随时切换，设置跨站持久生效
 // @author       You
 // @match        *://*/*
@@ -105,7 +105,10 @@
     // 等宽内容保持等宽，改比例字体后代码会错位
     const MONO_SELECTOR = ':not(code):not(pre):not(kbd):not(samp):not(tt)';
     // 智能模式下不染色的元素：链接、按钮、表单、代码、图标
-    const SMART_SELECTOR = ':not(a):not(button):not([role="button"]):not(input):not(textarea):not(select):not(option):not(code):not(pre):not(kbd):not(samp):not(mark):not(svg):not(svg *):not([class*="btn"]):not([class*="button"]):not([class*="badge"]):not([class*="chip"]):not([class*="tag"]):not([class*="icon"])';
+    // 注意 `:not(a *)`：链接内部的 h3/span 也必须排除。
+    // Google 搜索结果的标题就是 <a><h3>…</h3></a>，只排除 a 本身会让标题被染成正文色，
+    // 结果就是整页看不出哪条是链接。按钮、role=link 同理。
+    const SMART_SELECTOR = ':not(a):not(a *):not([role="link"]):not([role="link"] *):not(button):not(button *):not([role="button"]):not([role="button"] *):not(input):not(textarea):not(select):not(option):not(code):not(pre):not(kbd):not(samp):not(mark):not(svg):not(svg *):not([class*="btn"]):not([class*="button"]):not([class*="badge"]):not([class*="chip"]):not([class*="tag"]):not([class*="icon"])';
 
     const CSS = `
         /* ========== 字体 ========== */
@@ -384,7 +387,7 @@
             apply();
         }
 
-        console.log('[全局字体] v1.1.0 已加载：' + fontOf(settings.font).label + ' / ' + settings.color);
+        console.log('[全局字体] v1.1.1 已加载：' + fontOf(settings.font).label + ' / ' + settings.color);
     }
 
     bootstrap();
