@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         X 助手 - X Helper
 // @namespace    http://tampermonkey.net/
-// @version      1.1.0
-// @description  X (x.com) 页面增强：隐藏右侧看板（搜索框 / 趋势 / 推荐关注 / 页脚）、时间线居中、时间线加宽 1.5 倍，Alt+S 一键切换
+// @version      1.2.0
+// @description  X (x.com) 页面增强：隐藏右侧看板（搜索框 / 趋势 / 推荐关注 / 页脚）、时间线居中、时间线加宽 1.5 倍、紧凑模式收紧推文行距，Alt+S 一键切换
 // @author       You
 // @match        https://x.com/*
 // @match        https://twitter.com/*
@@ -20,7 +20,7 @@
 
     // 设置持久化（x.com 同源，localStorage 可用；@grant none 下直接用）
     const STORE_KEY = 'x-helper.settings.v1';
-    const DEFAULTS = { hideSidebar: true, centerTimeline: true, wideTimeline: true };
+    const DEFAULTS = { hideSidebar: true, centerTimeline: true, wideTimeline: true, compact: false };
 
     // 时间线缺口宽度：X 原生 max-width 600px，×1.5 ≈ 900px
     const WIDE_WIDTH = 900;
@@ -32,14 +32,24 @@
     // ========== 样式 ==========
     // 纯 CSS 生效，SPA 路由切换（React 重渲染）也不会失效
     const CSS = `
-        /* 1. 隐藏右侧看板整列：搜索框 / 趋势 / 推荐关注 / 页脚都在这一列里 */
+        /* 1. 隐藏右侧看板整列：搜索框 / 趋势 / 推荐关注 / 页脚都在这一列里
+              旧版是 [data-testid="sidebarColumn"]；
+              新版（Tailwind 布局）里主列 <main> 和侧栏 <aside> 是同一个 grid 的两个子元素 */
         html.xh-hide-sidebar [data-testid="sidebarColumn"],
         html.xh-hide-sidebar [data-xh-sidebar="1"] {
             display: none !important;
         }
+        html.xh-hide-sidebar div:has(> main) > aside {
+            display: none !important;
+        }
+        /* 侧栏那 380px 的栅格列也要让出来，否则主列还是被挤窄 */
+        html.xh-hide-sidebar div:has(> main) {
+            grid-template-columns: minmax(0, 1fr) !important;
+        }
 
         /* 2. 看板消失后右侧留白，把主时间线拉回视觉中央
-              primaryColumn 本身 max-width:600px，margin:auto 即可居中 */
+              旧版 primaryColumn 本身 max-width:600px，margin:auto 即可居中；
+              新版 <main> 自带 mx-auto，不用管 */
         html.xh-hide-sidebar.xh-center [data-testid="primaryColumn"] {
             margin-left: auto !important;
             margin-right: auto !important;
@@ -52,6 +62,39 @@
         }
         html.xh-wide [data-xh-wide="1"] {
             max-width: ${WIDE_WIDTH}px !important;
+        }
+        /* 新版：列宽由 main 的 max-w-[602px] + --x-timeline-max-width 两层限制 */
+        html.xh-wide main[class*="max-w-"] {
+            max-width: ${WIDE_WIDTH}px !important;
+        }
+        html.xh-wide {
+            --x-timeline-max-width: ${WIDE_WIDTH}px;
+        }
+
+        /* 4. 紧凑模式：推文上下留白 12px → 6px，正文行高与操作栏间距一起收紧
+              X 原生没有紧凑视图了（老版有），这里按原生数值折半还原 */
+        /* 旧版结构：article[data-testid="tweet"] 自带 padding，正文是 tweetText */
+        html.xh-compact article[data-testid="tweet"] {
+            padding-top: 6px !important;
+            padding-bottom: 6px !important;
+        }
+        html.xh-compact [data-testid="tweetText"] {
+            line-height: 1.25 !important;
+        }
+        html.xh-compact article[data-testid="tweet"] [role="group"] {
+            margin-top: 6px !important;
+        }
+        /* 新版结构：padding 在 article 的父 div 上，正文是 .text-lead（17px / 24px），
+           操作栏是 -mx-2 + min-h-5 那一行（margin-top:12px） */
+        html.xh-compact div:has(> article[class~="group/post"]) {
+            padding-top: 6px !important;
+            padding-bottom: 6px !important;
+        }
+        html.xh-compact article[class~="group/post"] [class*="text-lead"] {
+            line-height: 1.3 !important;
+        }
+        html.xh-compact article[class~="group/post"] [class*="-mx-2"][class*="min-h-5"] {
+            margin-top: 6px !important;
         }
 
         /* ========== 悬浮按钮 & 设置面板 ========== */
@@ -140,6 +183,7 @@
         cl.toggle('xh-hide-sidebar', !!settings.hideSidebar);
         cl.toggle('xh-center', !!(settings.hideSidebar && settings.centerTimeline));
         cl.toggle('xh-wide', !!settings.wideTimeline);
+        cl.toggle('xh-compact', !!settings.compact);
         if (settings.wideTimeline) relaxInnerWidth();
         syncUI();
     }
@@ -221,6 +265,7 @@
             <div class="xh-row" data-k="hideSidebar"><span>隐藏右侧看板</span><i class="xh-sw"></i></div>
             <div class="xh-row" data-k="centerTimeline"><span>时间线居中</span><i class="xh-sw"></i></div>
             <div class="xh-row" data-k="wideTimeline"><span>时间线加宽 ×1.5</span><i class="xh-sw"></i></div>
+            <div class="xh-row" data-k="compact"><span>紧凑模式</span><i class="xh-sw"></i></div>
             <div class="xh-tip">Alt + S 快速切换</div>
         `;
 
@@ -331,6 +376,6 @@
         tagSidebarFallback();
         initObserver();
         apply();
-        log('已启用，隐藏看板：' + settings.hideSidebar);
+        log('已启用，隐藏看板：' + settings.hideSidebar + '，紧凑模式：' + settings.compact);
     }
 })();
