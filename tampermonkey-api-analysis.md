@@ -5,6 +5,8 @@
 > 原始链接：<https://www.tampermonkey.net/documentation.php?locale=en\\\&q=deploying>
 >
 > 分析日期：2026-10-25
+>
+> 补充：2026-11-07 增加第 6 节，对 Chrome 商店正式包 **Tampermonkey 5.5.1（Manifest V3）** 做静态探测，核对运行时 API 与全部插件设置项。
 
 ---
 
@@ -204,7 +206,7 @@ Tampermonkey 使用浏览器扩展存储（如 IndexedDB/chrome.storage）保存
 | 运行时删除脚本 | **不支持** | -                  | 无官方 API         |
 | 批量预部署脚本 | 支持      | 浏览器策略 + JSON       | 仅企业/IT 管理员可用    |
 | 静默安装脚本  | **不支持** | -                  | 浏览器安全策略禁止       |
-| 脚本间数据共享 | 支持      | `GM_setValue` + 监听 | 同一域名下可行         |
+| 脚本间数据共享 | 部分      | 同一脚本内跨标签：`GM_setValue` + `GM_addValueChangeListener` | 存储按脚本隔离，脚本之间互相读不到 |
 
 ---
 
@@ -215,10 +217,121 @@ Tampermonkey 使用浏览器扩展存储（如 IndexedDB/chrome.storage）保存
 | <https://www.tampermonkey.net/documentation.php?locale=en\\\&q=deploying> | 官方部署文档（Enterprise Deployment） |
 | <https://www.tampermonkey.net/documentation.php>                          | 完整 API 文档                     |
 | <https://www.tampermonkey.net/faq.php>                                    | 常见问题（含 Extension IDs）         |
+| <https://clients2.google.com/service/update2/crx?response=redirect&prodversion=131.0&acceptformat=crx2,crx3&x=id%3Ddhdgffkkebhmkfjojejmpbldmpobfkfo%26uc> | 商店分发 CRX 直链（第 6 节静态探测用） |
 
 ---
 
-## 6. 建议
+## 6. 实测：5.5.1 的本地能力与插件设置项
+
+> 前面几节基于官方文档。本节直接对 Chrome 商店分发的正式包做静态探测，回答「脚本在本地到底能做什么、能不能改插件自己的设置」。
+
+### 6.1 探测方法
+
+```bash
+# 直接拉商店分发的 CRX（当前为 5.5.1 / Manifest V3）
+curl -sSL -o tm.crx \
+  "https://clients2.google.com/service/update2/crx?response=redirect&prodversion=131.0&acceptformat=crx2,crx3&x=id%3Ddhdgffkkebhmkfjojejmpbldmpobfkfo%26uc"
+
+unzip -q tm.crx -d tm-ext
+# 关键文件：manifest.json / background.js / schema.json / _locales/en/messages.json
+```
+
+### 6.2 扩展实际权限（manifest.json）
+
+```text
+version: 5.5.1, manifest_version: 3, background: service_worker
+
+permissions: notifications, unlimitedStorage, tabs, idle, webNavigation,
+             webRequest, webRequestBlocking, storage, contextMenus,
+             clipboardWrite, cookies, alarms, scripting, userScripts,
+             declarativeNetRequestWithHostAccess, offscreen, chrome://favicon/
+optional_permissions: downloads        # 首次 GM_download 时才申请
+host_permissions: <all_urls>
+```
+
+这组权限就是脚本能力的**天花板**：可联网、可读写 Cookie、可拦截请求、可写剪贴板、可弹系统通知；**没有** `fileSystem` / `nativeMessaging` / `management` / `debugger`。
+
+### 6.3 运行时 API 全表（从实现代码提取）
+
+`GM_*`（同步风格）与 `GM.*`（Promise 风格）两套命名空间同时存在，实现里出现的完整列表：
+
+```text
+GM_addElement GM_addStyle GM_addValueChangeListener GM_audio GM_cookie
+GM_deleteValue GM_deleteValues GM_download GM_getResourceText GM_getResourceURL
+GM_getTab GM_getTabs GM_getValue GM_getValues GM_info GM_listValues GM_log
+GM_notification GM_openInTab GM_registerMenuCommand GM_removeValueChangeListener
+GM_saveTab GM_setClipboard GM_setValue GM_setValues GM_unregisterMenuCommand
+GM_webRequest GM_xmlhttpRequest
+```
+
+| 类别 | API | 能力与前置条件 |
+| --- | --- | --- |
+| 存储 | `GM_setValue` / `getValue` / `deleteValue` / `listValues`，批量版 `GM_setValues` / `getValues` / `deleteValues` | 按脚本隔离、**跨网站共享**（不是按域名），`unlimitedStorage`；可在面板 Storage 页查看、编辑、导出 |
+| 存储事件 | `GM_addValueChangeListener` / `GM_removeValueChangeListener` | 跨标签页同步，适合「设置改了其他标签立即生效」 |
+| 跨标签 | `GM_getTab` / `GM_saveTab` / `GM_getTabs` | 同一脚本在多标签之间共享一个对象 |
+| 网络 | `GM_xmlhttpRequest` / `GM.xmlHttpRequest` | 跨域请求，受 `@connect` 白名单约束，`<all_urls>` 已具备 |
+| 请求拦截 | `GM_webRequest` | 拦截 / 阻断 / 重定向 / 改请求头；**需 Config mode = Advanced**，改头还要开「Allow headers to be modified」 |
+| Cookie | `GM_cookie`（list / set / delete） | 需设置里打开「Script cookies access」（Advanced 模式下可见） |
+| 下载 | `GM_download` | 单向落盘到下载目录，支持 `saveAs` / `headers` / `onprogress`；首次触发时申请 `downloads` 可选权限 |
+| 剪贴板 | `GM_setClipboard` | **只写不读**（仅 `clipboardWrite`），读剪贴板无 API |
+| 通知 | `GM_notification` | 系统级通知，支持按钮与点击回调 |
+| 标签页 | `GM_openInTab` | 新标签 / 新窗口，可设 active、insert |
+| 样式 / 节点 | `GM_addStyle`、`GM_addElement` | 注入 CSS / 创建元素，绕过页面 CSP |
+| 资源 | `GM_getResourceText` / `GM_getResourceURL` | 读取 `@resource` 打包进来的文件，可转 blob URL |
+| 菜单 | `GM_registerMenuCommand` / `GM_unregisterMenuCommand` | 在扩展图标菜单里加命令；**这是唯一能改变插件交互的入口** |
+| 信息 | `GM_info` | 脚本元数据、TM 版本、脚本是否将更新 |
+| 日志 | `GM_log` | 输出到 TM 控制台 |
+| 内部 | `GM.backgroundControl`、`GM_audio` | 非公开用途，不建议依赖 |
+
+补充：
+
+- 具体注入哪些 API 由 `@grant` 决定；`@grant none` 时脚本跑在页面上下文，`GM_*` 全部不可用，`unsafeWindow` 也就没有意义。
+- 脚本之间**无法互相读取存储**，想共享只能借页面 `window` 或自建服务。
+
+### 6.4 插件设置项清单（从 background.js 提取到 76 项）
+
+| 分组 | 设置项 |
+| --- | --- |
+| 常规 | `configMode`（Novice 0 / Beginner 50 / **Advanced 100**）、`i18n`、`logLevel`、`trash_mode`、`tags_enabled`、`tags` |
+| 同步 | `sync_enabled`、`sync_type`、`cloud_url`、`cloud_user`、`cloud_pass`、`run_sync` |
+| 外观 | `layout`、`layout_user_css`、`notification_showUpdate`、`favicon_service`、`appearance_badges`、`appearance_badge_color` |
+| 菜单 | `context_menu_enabled`、`context_menu_scripts`、`context_menu_commands`、`action_menu_scripts_hide_disabled`、`action_menu_columns`、`action_menu_scripts_sort`、`userscript_search_mode` |
+| 编辑器 | `editor_enabled`、`editor_theme`、`editor_fontSize`、`editor_keyMap`、`editor_indentUnit`、`editor_tabSize`、`editor_indentWithTabs`、`editor_tabMode`、`editor_autoSave`、`editor_easySave`、`editor_autoLint`、`editor_linter_config` 等 |
+| 脚本更新 | `scriptUpdateCheckPeriod`、`scriptUpdateAutomaticInstall`、`scriptUpdateCheckDisabled`、`scriptUpdateHideNotificationAfter`、`notification_silentScriptUpdate`、`external_update_interval`、`run_script_updates` |
+| 运行环境 | `sandbox_mode`、`runtime_run_in`、`runtime_content_mode`、`runtime_strict_mode`、`runtime_top_level_await` |
+| 安全 / 权限 | `script_file_access`（本地文件）、`script_cookie_access`（Cookie）、`connect_mode`（跨域确认）、`external_connect`、`require_sri_mode`、`webrequest_fixCSP`、`webrequest_fixContentCSP`、`webrequest_modHeaders` |
+| 页面过滤 | `page_filter_mode`、`page_whitelist`、`forbiddenPages`、`script_include_mode`、`script_blacklist_type`、`require_blacklist` |
+| 其他 | `incognito_mode`、`scriptUrlDetection`、`script_templates`、`missing_host_permissions`、`reset_simple`（重启 TM）、`reset_factory`（恢复出厂） |
+
+另外 `schema.json` 只有一个 `jsonImport` 字段，证实**设置可导出 / 导入 JSON**，格式与第 2 节的部署配置一致（`hash` / `url` / `haltOnError` / `installAsSystemScripts`）。
+
+### 6.5 能力边界
+
+| 需求 | 能否做到 | 说明 |
+| --- | --- | --- |
+| 读写脚本自己的配置 | ✅ | `GM_setValue` 系列，跨站持久 |
+| 改插件设置（配置模式、编辑器、同步…） | ❌ | 无任何 API；只能人手动点 UI |
+| 改 / 删其他脚本的存储 | ❌ | 存储按脚本隔离 |
+| 新增 / 编辑 / 删除脚本 | ❌ | 见第 1、2 节结论 |
+| 读写任意本地文件 | ❌ | 只能 `GM_download` 单向写出；读文件需 `file://` + 用户开「允许访问文件网址」+ 开本地文件访问 |
+| 调用系统命令 / 启动 App / 原生消息 | ❌ | 无 `nativeMessaging` |
+| 使用 `chrome.*` 扩展 API | ❌ | MV3 `userScripts` 世界隔离，拿不到 `chrome.storage` / `chrome.tabs` |
+| 跨域请求 | ✅ | `GM_xmlhttpRequest`，受 `@connect` 与 `connect_mode` 约束 |
+| 拦截 / 改写网络请求 | ⚠️ | `GM_webRequest`，需 Advanced 配置模式 |
+| 读写 Cookie | ⚠️ | `GM_cookie`，需打开 Script cookies access |
+| 桌面通知 / 剪贴板写入 | ✅ | `GM_notification` / `GM_setClipboard` |
+| 多标签共享状态 | ✅ | `GM_getTab` / `GM_saveTab` / `GM_getTabs` + value change 监听 |
+
+### 6.6 对本仓库脚本的启示
+
+1. **全局字体与颜色脚本**（`global-font-helper.user.js`）已经用到最关键的组合：`GM_setValue` 做跨站持久化 + `GM_registerMenuCommand` 做切换，方向正确。
+2. 还能白捡的能力：`GM_download`（一键导出当前配置 JSON）、`GM_notification`（切换后系统提示）、`GM_addValueChangeListener`（多标签同时开时配置实时同步）。
+3. `GM_setValue` 是**跨站共用**的，若要做「每个网站不同字体」，得自己在 value 里按 `location.host` 分组存储。
+4. 需要请求拦截、Cookie 之类的「半隐藏」能力时，先提示用户在设置里把 Config mode 切到 Advanced，否则调了也没效果。
+
+---
+
+## 7. 建议
 
 如果需要在运行时动态管理脚本，建议考虑以下架构调整：
 
