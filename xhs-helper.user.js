@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         小红书助手 - XHS Helper
 // @namespace    http://tampermonkey.net/
-// @version      1.1.0
+// @version      1.1.1
 // @description  小红书笔记详情弹窗增强：正文区域加宽（弹窗整体约原生 1.5 倍，宽度自适应且可手动微调），Alt+W 一键切换
 // @author       You
 // @match        https://www.xiaohongshu.com/*
@@ -40,10 +40,13 @@
     // 正文列（.interaction-container）的宽度由站点的 CSS 变量控制：
     //   :root { --interaction-width: 440px }（断点 440 / 400 / 360）
     //   .interaction-container { width: var(--interaction-width) }
-    // 整个弹窗的宽度则是 JS 内联算的，写死在 #noteContainer 的 style 上：
+    // 整个弹窗的宽度则是 JS 算的，写在 #noteContainer 的 style 上：
     //   --undertake-container-width: calc(--undertake-media-width + --undertake-interaction-width)
     //   width: var(--undertake-container-width)
-    // 所以只要在这两个变量上做文章，弹窗就会自己算好总宽，不用碰站点 DOM。
+    //   transform: translate((100vw - 容器宽) / 2, gap)   ← 靠这个水平居中
+    // 但页面水合后 React 会把这三个值算成固定 px 写回内联样式，变量就不再被引用了，
+    // 只改变量会出现"内容撑开了、外框和位移没跟上"，表现就是右边溢出屏幕。
+    // 所以宽度、位移、变量三处一起用 !important 覆盖，两边都能对上。
     //
     // 坑：站点的图片列宽度是 max(正文列宽, ...)，正文一变宽图片列会被一起撑开，
     // 结果是"两列等宽"，图片只是在自己的框里居中留白。这里把「原生正文列宽」代进
@@ -61,15 +64,25 @@
                         calc(100vw - var(--xhs-native-iw) - 4 * var(--undertake-gap, 24px) - 80px))
                 );
 
-                /* 图片列锁在原生宽度，不跟着正文列变宽 */
-                --undertake-media-width: var(--xhs-native-media) !important;
-
                 /* 正文列：JS 写入目标值，同时兜底不超过一屏（左右各留 40px） */
                 --xhs-w: min(var(--xhs-note-width, ${MIN_TEXT}px), calc(100vw - 80px - var(--xhs-native-media)));
+                --xhs-total: calc(var(--xhs-native-media) + var(--xhs-w));
+
+                /* 1) 外框宽度 */
+                width: var(--xhs-total) !important;
+                /* 2) 水平居中：站点只做平移不做缩放，位移必须按新宽度重算 */
+                transform: translate(max(0px, calc((100vw - var(--xhs-total)) / 2)), var(--undertake-gap, 24px)) scale(1) !important;
+
+                /* 3) 变量：内联样式还在引用变量时也保持一致 */
+                --undertake-container-width: var(--xhs-total) !important;
+                --undertake-media-width: var(--xhs-native-media) !important;
                 --undertake-interaction-width: var(--xhs-w);
             }
             html.xhs-wide #noteContainer .interaction-container {
                 width: var(--xhs-w) !important;
+                /* 兜底：万一图片列实际比估算的宽，让正文列可以被压缩，不会顶出弹窗外框 */
+                min-width: 0 !important;
+                flex-shrink: 1 !important;
             }
         }
         @media (min-width: 960px) and (max-width: 1191.98px) {
