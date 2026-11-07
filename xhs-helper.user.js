@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         小红书助手 - XHS Helper
 // @namespace    http://tampermonkey.net/
-// @version      1.0.0
-// @description  小红书笔记详情弹窗增强：正文文本区域加宽（默认 560px，可调），Alt+W 一键切换，设置本地保存
+// @version      1.1.0
+// @description  小红书笔记详情弹窗增强：正文区域加宽（弹窗整体约原生 1.5 倍，宽度自适应且可手动微调），Alt+W 一键切换
 // @author       You
 // @match        https://www.xiaohongshu.com/*
 // @match        https://xiaohongshu.com/*
@@ -19,13 +19,20 @@
     const log = (...args) => DEBUG && console.log('[小红书助手]', ...args);
 
     // 设置持久化（@grant none 下 localStorage 与站点同源可用）
-    const STORE_KEY = 'xhs-helper.settings.v1';
-    const DEFAULTS = { wide: true, width: 560 };
+    const STORE_KEY = 'xhs-helper.settings.v2';
+    // width = 0 表示「自适应」：按屏幕算出能撑到的最大宽度（目标见 autoWidth）
+    const DEFAULTS = { wide: true, width: 0 };
 
     // 站点原生正文列宽度：视口 ≥1424px 为 440px，1192-1423 为 400px，960-1191 为 360px
     const MIN_WIDTH = 360;
     const MAX_WIDTH = 900;
     const STEP = 40;
+
+    // 自适应参数：弹窗整体按原生宽度的 1.5 倍，文字列不低于 660（原生 440 的 1.5 倍）
+    const SCALE = 1.5;
+    const MIN_TEXT = 660;
+    // 站点 .note-detail-mask 的 --undertake-gap，用于复算原生图片列宽度
+    const GAP = 24;
 
     let settings = Object.assign({}, DEFAULTS, loadSettings());
 
@@ -33,22 +40,43 @@
     // 正文列（.interaction-container）的宽度由站点的 CSS 变量控制：
     //   :root { --interaction-width: 440px }（断点 440 / 400 / 360）
     //   .interaction-container { width: var(--interaction-width) }
-    // 但整个弹窗的宽度是 JS 内联算出来的，写死在 #noteContainer 的 style 上：
+    // 整个弹窗的宽度则是 JS 内联算的，写死在 #noteContainer 的 style 上：
     //   --undertake-container-width: calc(--undertake-media-width + --undertake-interaction-width)
     //   width: var(--undertake-container-width)
-    // 所以两个变量必须一起改，否则正文列变宽后会把内容挤出弹窗外框。
-    // 内联样式里的 calc 引用的是元素自身的变量，因此在 #noteContainer 上重新声明即可生效，
-    // 不需要改动站点 DOM，也不会被 React 重渲染冲掉。
+    // 所以只要在这两个变量上做文章，弹窗就会自己算好总宽，不用碰站点 DOM。
+    //
+    // 坑：站点的图片列宽度是 max(正文列宽, ...)，正文一变宽图片列会被一起撑开，
+    // 结果是"两列等宽"，图片只是在自己的框里居中留白。这里把「原生正文列宽」代进
+    // 同一个公式锁住图片列，多出来的宽度才真正落到正文上。
     //
     // 只作用于桌面布局：<960px 时站点是整屏移动端排版，变量值本身是 100vw，强行改会错位。
-    // 再按视口兜底一次（min(...)），保证弹窗最宽不超过一屏，避免小屏上右侧被裁掉。
     const CSS = `
         @media (min-width: 960px) {
             html.xhs-wide #noteContainer {
-                --xhs-w: min(var(--xhs-note-width, ${DEFAULTS.width}px), calc((100vw - 160px) / 2));
-                --interaction-width: var(--xhs-w);
+                /* 站点原生正文列宽，只用来推算原生弹窗有多宽，不直接生效 */
+                --xhs-native-iw: 440px;
+                --xhs-native-media: max(
+                    var(--xhs-native-iw),
+                    min(calc((100vh - 2 * var(--undertake-gap, 24px)) * 0.75),
+                        calc(100vw - var(--xhs-native-iw) - 4 * var(--undertake-gap, 24px) - 80px))
+                );
+
+                /* 图片列锁在原生宽度，不跟着正文列变宽 */
+                --undertake-media-width: var(--xhs-native-media) !important;
+
+                /* 正文列：JS 写入目标值，同时兜底不超过一屏（左右各留 40px） */
+                --xhs-w: min(var(--xhs-note-width, ${MIN_TEXT}px), calc(100vw - 80px - var(--xhs-native-media)));
                 --undertake-interaction-width: var(--xhs-w);
             }
+            html.xhs-wide #noteContainer .interaction-container {
+                width: var(--xhs-w) !important;
+            }
+        }
+        @media (min-width: 960px) and (max-width: 1191.98px) {
+            html.xhs-wide #noteContainer { --xhs-native-iw: 360px; }
+        }
+        @media (min-width: 1192px) and (max-width: 1423.98px) {
+            html.xhs-wide #noteContainer { --xhs-native-iw: 400px; }
         }
 
         /* ========== 悬浮按钮 & 设置面板 ========== */
@@ -106,6 +134,11 @@
         .xhs-stepper b {
             min-width: 52px; text-align: center; font-weight: 600; font-size: 12px; color: #ff2442;
         }
+        .xhs-auto {
+            display: none; margin-left: 4px; padding: 0 3px; font-style: normal; font-size: 10px;
+            line-height: 14px; color: #ff2442; border: 1px solid currentColor; border-radius: 3px;
+        }
+        .xhs-auto.xhs-show { display: inline-block; }
         .xhs-tip {
             padding: 2px 8px 4px; font-size: 11px; color: #999;
             border-top: 1px solid rgba(0,0,0,.06); margin-top: 4px; padding-top: 6px;
@@ -156,20 +189,42 @@
 
     function clampWidth(w) {
         const n = Math.round(Number(w) / STEP) * STEP;
-        if (!isFinite(n)) return DEFAULTS.width;
+        if (!isFinite(n)) return MIN_TEXT;
         return Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, n));
     }
 
-    // 弹窗总宽 = 图片列 + 正文列，而图片列最小也等于正文列宽，
-    // 所以正文列最多占到半屏左右，再宽右侧就会被裁掉（站点只用 transform 平移，不做缩放）。
-    // 这里按当前视口算一个实际上限，让面板上的「+」在到顶时能正确置灰。
-    function viewportMax() {
-        const byScreen = Math.floor((window.innerWidth - 160) / 2 / STEP) * STEP;
-        return Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, byScreen));
+    // 站点原生正文列宽（跟着断点走，见 CSS 里的 --xhs-native-iw）
+    function nativeIW() {
+        const vw = window.innerWidth;
+        if (vw >= 1424) return 440;
+        if (vw >= 1192) return 400;
+        return 360;
+    }
+
+    // 复算站点算出的图片列宽度：竖图按高度撑（3:4），横图受剩余宽度限制
+    function nativeMediaWidth() {
+        const iw = nativeIW();
+        const byHeight = (window.innerHeight - 2 * GAP) * 0.75;
+        const byWidth = window.innerWidth - iw - 4 * GAP - 80;
+        return Math.max(iw, Math.min(byHeight, byWidth));
+    }
+
+    // 正文列最多能占多宽：弹窗左右各留 40px，否则站点只做平移不缩放，右边会被裁掉
+    function viewportCap() {
+        return Math.floor((window.innerWidth - 80 - nativeMediaWidth()) / STEP) * STEP;
+    }
+
+    // 自适应：把弹窗整体做到原生宽度的 1.5 倍，多出来的宽度全给正文列
+    function autoWidth() {
+        const media = nativeMediaWidth();
+        const target = SCALE * (media + nativeIW()) - media;
+        const want = Math.max(MIN_TEXT, target);
+        return Math.min(Math.round(want / STEP) * STEP, viewportCap());
     }
 
     function effectiveWidth() {
-        return Math.min(clampWidth(settings.width), viewportMax());
+        if (!settings.width) return autoWidth();
+        return Math.min(clampWidth(settings.width), viewportCap());
     }
 
     function setSetting(key, value) {
@@ -183,9 +238,10 @@
         toast(settings.wide ? `正文区域已加宽（${effectiveWidth()}px）` : '正文区域已恢复原宽');
     }
 
+    // 点 ± 后从「自适应」切换成手动宽度
     function stepWidth(dir) {
         const cur = effectiveWidth();
-        const next = Math.min(viewportMax(), Math.max(MIN_WIDTH, cur + dir * STEP));
+        const next = Math.min(viewportCap(), Math.max(MIN_WIDTH, cur + dir * STEP));
         if (next === cur) return;
         settings.wide = true;
         setSetting('width', next);
@@ -208,7 +264,7 @@
         panel.innerHTML = `
             <div class="xhs-row" data-k="wide"><span>正文区域加宽</span><i class="xhs-sw"></i></div>
             <div class="xhs-row">
-                <span>宽度</span>
+                <span>宽度<i class="xhs-auto">自动</i></span>
                 <span class="xhs-stepper">
                     <button type="button" data-step="-1" title="变窄">−</button>
                     <b data-val>${effectiveWidth()}px</b>
@@ -279,10 +335,13 @@
         const val = panelEl.querySelector('[data-val]');
         if (val) val.textContent = w + 'px';
 
+        const autoTag = panelEl.querySelector('.xhs-auto');
+        if (autoTag) autoTag.classList.toggle('xhs-show', !settings.width);
+
         const minus = panelEl.querySelector('button[data-step="-1"]');
         const plus = panelEl.querySelector('button[data-step="1"]');
         if (minus) minus.disabled = w <= MIN_WIDTH;
-        if (plus) plus.disabled = w >= viewportMax();
+        if (plus) plus.disabled = w >= viewportCap();
     }
 
     let toastEl = null;
