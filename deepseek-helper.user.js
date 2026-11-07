@@ -1,11 +1,12 @@
 // ==UserScript==
 // @name         DeepSeek 助手 - DeepSeek Helper
 // @namespace    http://tampermonkey.net/
-// @version      1.2.1
-// @description  DeepSeek 聊天页面增强：会话一键静默删除、多关键词批量删除、双击复制
+// @version      1.3.0
+// @description  DeepSeek 聊天页面增强：聊天区加宽（原生 1.5 倍，居中）、会话一键静默删除、多关键词批量删除、双击复制
 // @author       You
 // @match        https://chat.deepseek.com/*
 // @grant        none
+// @run-at       document-start
 // @updateURL    https://raw.githubusercontent.com/alphatok/monkey-script/main/deepseek-helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/alphatok/monkey-script/main/deepseek-helper.user.js
 // ==/UserScript==
@@ -604,6 +605,313 @@
         }
     }
 
+    // ========== 功能 4：聊天区加宽 ==========
+    // 站点把聊天区的宽度收在一个 CSS 变量里：
+    //   :root { --message-list-max-width: 840px }   （<1024px 时 712px）
+    // 消息列表容器的内联样式是
+    //   padding-left/right: calc((100% - var(--message-list-max-width)) / 2)
+    // 输入区 ._871cbca 的 padding、输入框 ._9f86274 的 max-width 也都用这个变量。
+    // 所以只改这一个变量，消息列和输入框会一起变宽，而且居中逻辑是站点自己算的，
+    // 不用碰任何 DOM，也不会被 React 重渲染冲掉。
+    const WIDE_STORE = 'dsh-helper.wide.v1';
+    // width = 0 表示「自动」：按原生宽度 ×1.5
+    const WIDE_DEFAULTS = { wide: true, width: 0 };
+    const WIDE_SCALE = 1.5;
+    const WIDE_STEP = 40;
+    // 加宽后左右各留的空白，避免贴到侧栏 / 窗口边缘
+    const WIDE_GAP = 64;
+
+    let wideSettings = Object.assign({}, WIDE_DEFAULTS, loadWideSettings());
+    let widePanel = null;
+    let wideBtn = null;
+    let wideCloseTimer = null;
+    let wideScroller = null;
+    let wideRO = null;
+
+    const WIDE_CSS = `
+        html.dsh-wide {
+            --message-list-max-width: var(--dsh-width, 840px);
+        }
+        /* 新对话页的居中容器把 840px 写死了，跟变量无关，顺手一起放宽。
+           类名是站点构建产物（CSS Module 哈希），改版后会失效，失效也只是保持原样。 */
+        html.dsh-wide ._9a2f8e4 {
+            max-width: var(--dsh-width, 840px);
+        }
+
+        /* ========== 悬浮按钮 & 设置面板 ========== */
+        #dsh-wide-ui, #dsh-wide-ui * { box-sizing: border-box; }
+        #dsh-wide-ui {
+            position: fixed; right: 20px; bottom: 152px; width: 40px; height: 40px;
+            z-index: 2147483647;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif;
+            font-size: 13px; line-height: 1.4; text-align: left;
+        }
+        #dsh-wide-btn {
+            width: 40px; height: 40px; padding: 0; border-radius: 999px; cursor: pointer;
+            border: 1px solid rgba(0,0,0,.08);
+            background: rgba(255,255,255,.94); color: #4d6bfe;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 15px; font-weight: 700; line-height: 1;
+            box-shadow: 0 2px 10px rgba(0,0,0,.12);
+            opacity: .55; transition: opacity .15s, background .15s, color .15s;
+        }
+        #dsh-wide-ui:hover #dsh-wide-btn { opacity: 1; }
+        #dsh-wide-btn.dsh-on { background: #4d6bfe; border-color: #4d6bfe; color: #fff; opacity: .95; }
+        #dsh-wide-panel {
+            position: absolute; right: 0; bottom: 44px; width: 218px; padding: 6px;
+            display: none; color: #333; background: #fff;
+            border: 1px solid rgba(0,0,0,.08); border-radius: 12px;
+            box-shadow: 0 8px 28px rgba(0,0,0,.16);
+        }
+        #dsh-wide-panel.dsh-open { display: block; }
+        #dsh-wide-ui .dsh-row {
+            display: flex; align-items: center; justify-content: space-between; gap: 10px;
+            padding: 7px 8px; border-radius: 8px; cursor: pointer; user-select: none;
+        }
+        #dsh-wide-ui .dsh-row:hover { background: rgba(0,0,0,.04); }
+        #dsh-wide-ui .dsh-sw {
+            position: relative; flex: 0 0 auto; width: 32px; height: 18px;
+            border-radius: 999px; background: #d9d9d9; transition: background .15s;
+        }
+        #dsh-wide-ui .dsh-sw::after {
+            content: ''; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px;
+            border-radius: 50%; background: #fff; transition: transform .15s;
+            box-shadow: 0 1px 2px rgba(0,0,0,.15);
+        }
+        #dsh-wide-ui .dsh-row.dsh-on .dsh-sw { background: #4d6bfe; }
+        #dsh-wide-ui .dsh-row.dsh-on .dsh-sw::after { transform: translateX(14px); }
+
+        #dsh-wide-ui .dsh-stepper { display: flex; align-items: center; gap: 4px; cursor: default; }
+        #dsh-wide-ui .dsh-stepper button {
+            width: 22px; height: 22px; padding: 0; border-radius: 6px; cursor: pointer;
+            border: 1px solid rgba(0,0,0,.1); background: #f7f7f7; color: #333;
+            font-size: 14px; line-height: 1; font-family: inherit;
+        }
+        #dsh-wide-ui .dsh-stepper button:hover { background: #efefef; }
+        #dsh-wide-ui .dsh-stepper button:disabled { opacity: .35; cursor: not-allowed; }
+        #dsh-wide-ui .dsh-stepper b {
+            min-width: 52px; text-align: center; font-weight: 600; font-size: 12px; color: #4d6bfe;
+        }
+        #dsh-wide-ui .dsh-auto {
+            display: none; margin-left: 4px; padding: 0 3px; font-style: normal; font-size: 10px;
+            line-height: 14px; color: #4d6bfe; border: 1px solid currentColor; border-radius: 3px;
+        }
+        #dsh-wide-ui .dsh-auto.dsh-show { display: inline-block; }
+        #dsh-wide-ui .dsh-tip {
+            padding: 6px 8px 4px; font-size: 11px; color: #999;
+            border-top: 1px solid rgba(0,0,0,.06); margin-top: 4px;
+        }
+    `;
+
+    function injectWideCSS() {
+        if (document.getElementById('dsh-wide-style')) return;
+        const style = document.createElement('style');
+        style.id = 'dsh-wide-style';
+        style.textContent = WIDE_CSS;
+        (document.head || document.documentElement).appendChild(style);
+    }
+
+    function loadWideSettings() {
+        try {
+            const raw = localStorage.getItem(WIDE_STORE);
+            return raw ? (JSON.parse(raw) || {}) : {};
+        } catch (e) {
+            return {};
+        }
+    }
+
+    function saveWideSettings() {
+        try {
+            localStorage.setItem(WIDE_STORE, JSON.stringify(wideSettings));
+        } catch (e) { /* 忽略隐私模式写入失败 */ }
+    }
+
+    // 站点原生宽度（跟着断点走，见 CSS 里的 :root 声明）
+    function nativeMaxWidth() {
+        return window.innerWidth >= 1024 ? 840 : 712;
+    }
+
+    // 消息列表滚动容器由站点自己把宽度写进 --dsl-virtual-list-width，
+    // 拿它当「可用宽度」，侧栏展开/收起都能跟着变。
+    function findScroller() {
+        const el = document.querySelector('[style*="--dsl-virtual-list-width"]');
+        return el && el.clientWidth > 0 ? el : null;
+    }
+
+    function mainAreaWidth() {
+        const el = findScroller();
+        if (el) return el.clientWidth;
+        // 兜底：按侧栏展开（261px）估算，宁可窄一点也不要撑出屏幕
+        return Math.max(320, window.innerWidth - 300);
+    }
+
+    // 加宽上限：不超过主区域宽度，也不低于原生宽度（窄屏时保持原样）
+    function wideCap() {
+        const raw = Math.floor((mainAreaWidth() - WIDE_GAP) / WIDE_STEP) * WIDE_STEP;
+        return Math.max(nativeMaxWidth(), raw);
+    }
+
+    function autoWidth() {
+        return Math.min(Math.round(nativeMaxWidth() * WIDE_SCALE), wideCap());
+    }
+
+    function effectiveWidth() {
+        if (!wideSettings.width) return autoWidth();
+        const n = Math.round(Number(wideSettings.width) / WIDE_STEP) * WIDE_STEP;
+        if (!isFinite(n)) return autoWidth();
+        return Math.min(wideCap(), Math.max(nativeMaxWidth(), n));
+    }
+
+    function applyWide() {
+        const html = document.documentElement;
+        if (!html) return;
+        observeScroller();
+        html.classList.toggle('dsh-wide', !!wideSettings.wide);
+        const w = effectiveWidth() + 'px';
+        if (html.style.getPropertyValue('--dsh-width') !== w) {
+            html.style.setProperty('--dsh-width', w);
+        }
+        syncWideUI();
+    }
+
+    // 侧栏展开 / 收起会改变可用宽度，跟着重算一次上限
+    function observeScroller() {
+        const el = findScroller();
+        if (el === wideScroller) return;
+        if (wideRO) { wideRO.disconnect(); wideRO = null; }
+        wideScroller = el;
+        if (!el || typeof ResizeObserver === 'undefined') return;
+        wideRO = new ResizeObserver(() => applyWide());
+        wideRO.observe(el);
+    }
+
+    function toggleWide() {
+        wideSettings.wide = !wideSettings.wide;
+        saveWideSettings();
+        applyWide();
+        showToast(wideSettings.wide
+            ? `聊天区已加宽（${effectiveWidth()}px）`
+            : '聊天区已恢复原宽');
+    }
+
+    // 点 ± 后从「自动」切换成手动宽度
+    function stepWide(dir) {
+        const cur = effectiveWidth();
+        const next = Math.min(wideCap(), Math.max(nativeMaxWidth(), cur + dir * WIDE_STEP));
+        if (next === cur) return;
+        wideSettings.wide = true;
+        wideSettings.width = next;
+        saveWideSettings();
+        applyWide();
+        showToast(`聊天区宽度 ${next}px`);
+    }
+
+    function buildWideUI() {
+        if (document.getElementById('dsh-wide-ui')) return;
+
+        const root = document.createElement('div');
+        root.id = 'dsh-wide-ui';
+
+        const panel = document.createElement('div');
+        panel.id = 'dsh-wide-panel';
+        panel.innerHTML = `
+            <div class="dsh-row" data-k="wide"><span>聊天区加宽</span><i class="dsh-sw"></i></div>
+            <div class="dsh-row">
+                <span>宽度<i class="dsh-auto">自动</i></span>
+                <span class="dsh-stepper">
+                    <button type="button" data-step="-1" title="变窄">−</button>
+                    <b data-val>0px</b>
+                    <button type="button" data-step="1" title="变宽">+</button>
+                </span>
+            </div>
+            <div class="dsh-tip">Alt + W 快速切换</div>
+        `;
+
+        const btn = document.createElement('button');
+        btn.id = 'dsh-wide-btn';
+        btn.type = 'button';
+        btn.textContent = '宽';
+        btn.title = 'DeepSeek 助手：点击切换聊天区加宽（Alt+W）';
+
+        root.appendChild(panel);
+        root.appendChild(btn);
+        // 挂到 <html> 上，避免被 React 重渲染清掉
+        document.documentElement.appendChild(root);
+
+        widePanel = panel;
+        wideBtn = btn;
+
+        root.addEventListener('mouseenter', () => {
+            clearTimeout(wideCloseTimer);
+            panel.classList.add('dsh-open');
+        });
+        root.addEventListener('mouseleave', () => {
+            wideCloseTimer = setTimeout(() => panel.classList.remove('dsh-open'), 300);
+        });
+
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            toggleWide();
+        });
+
+        panel.addEventListener('click', (e) => {
+            const stepBtn = e.target.closest('button[data-step]');
+            if (stepBtn) {
+                e.stopPropagation();
+                stepWide(Number(stepBtn.getAttribute('data-step')));
+                return;
+            }
+            const row = e.target.closest('.dsh-row[data-k]');
+            if (!row) return;
+            e.stopPropagation();
+            toggleWide();
+        });
+
+        syncWideUI();
+    }
+
+    function syncWideUI() {
+        if (!wideBtn || !widePanel) return;
+        const w = effectiveWidth();
+        wideBtn.classList.toggle('dsh-on', !!wideSettings.wide);
+        wideBtn.title = wideSettings.wide
+            ? `DeepSeek 助手：聊天区已加宽至 ${w}px（Alt+W 切换）`
+            : 'DeepSeek 助手：点击加宽聊天区（Alt+W）';
+
+        widePanel.querySelectorAll('.dsh-row[data-k]').forEach((row) => {
+            row.classList.toggle('dsh-on', !!wideSettings[row.getAttribute('data-k')]);
+        });
+
+        const val = widePanel.querySelector('[data-val]');
+        if (val) val.textContent = w + 'px';
+
+        const autoTag = widePanel.querySelector('.dsh-auto');
+        if (autoTag) autoTag.classList.toggle('dsh-show', !wideSettings.width);
+
+        const minus = widePanel.querySelector('button[data-step="-1"]');
+        const plus = widePanel.querySelector('button[data-step="1"]');
+        if (minus) minus.disabled = w <= nativeMaxWidth();
+        if (plus) plus.disabled = w >= wideCap();
+    }
+
+    function initWideChat() {
+        buildWideUI();
+
+        document.addEventListener('keydown', (e) => {
+            if (!e.altKey || e.ctrlKey || e.metaKey) return;
+            if (e.code !== 'KeyW' && e.key.toLowerCase() !== 'w') return;
+            e.preventDefault();
+            e.stopPropagation();
+            toggleWide();
+        }, true);
+
+        window.addEventListener('resize', applyWide);
+        // 聊天页是异步挂载的，滚动容器出现后再补算一次上限
+        [600, 1500, 3000].forEach((t) => setTimeout(applyWide, t));
+        applyWide();
+        log('聊天区加宽已启用，宽度：' + effectiveWidth() + 'px');
+    }
+
     // ========== 诊断：控制台执行 dsDump() ==========
     function installDiagnostics() {
         window.dsDump = function () {
@@ -627,13 +935,18 @@
     function bootstrap() {
         if (window.__deepseekHelperLoaded) return;
         window.__deepseekHelperLoaded = true;
-        console.log('[DeepSeek助手] v1.2.1 已加载');
+        console.log('[DeepSeek助手] v1.3.0 已加载');
 
         initHoverDelete();
         initCopyOnDblclick();
         initBatchPanel();
+        initWideChat();
         installDiagnostics();
     }
+
+    // 宽度变量要在首屏渲染前就位，否则会先看到原生宽度再跳变
+    injectWideCSS();
+    if (document.documentElement) applyWide();
 
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', bootstrap);
