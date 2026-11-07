@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         全局字体与文字颜色 - Global Font Helper
 // @namespace    http://tampermonkey.net/
-// @version      1.0.0
-// @description  给所有网页统一设置字体与文字颜色：字体默认苹果系统字体栈，颜色默认 #0b214a，可在 Tampermonkey 菜单里随时切换，设置跨站持久生效
+// @version      1.1.0
+// @description  给所有网页统一设置字体与文字颜色：内置 8 套中英文友好字体栈（含 HarmonyOS Sans、MiSans、思源黑体、普惠体、霞鹜文楷），颜色默认 #0b214a，可在 Tampermonkey 菜单里随时切换，设置跨站持久生效
 // @author       You
 // @match        *://*/*
 // @grant        GM_registerMenuCommand
@@ -19,32 +19,65 @@
     'use strict';
 
     // ========== 可选项 ==========
-    // 字体：优先用系统自带、屏幕显示清晰的字体栈，不加载网络字体
+    // 字体：优先用本机已安装的字体，不加载网络字体。
+    // 中英混排顺序：西文放前面（Inter 有就用 Inter，没有则回退到中文字体自带的西文），
+    // 中文字体放在 -apple-system 之前，否则中文会被苹方抢先接管。
+    // probe 用于检测本机是否真的装了这款字，未安装的会在菜单里标注。
+    //
+    // 官方获取渠道（均免费商用）：
+    //   HarmonyOS Sans  https://developer.harmonyos.com/cn/design/resource
+    //   MiSans          https://hyperos.mi.com/font
+    //   思源黑体         https://github.com/adobe-fonts/source-han-sans
+    //   阿里巴巴普惠体    https://www.alibabafonts.com
+    //   霞鹜文楷         https://github.com/lxgw/LxgwWenKai
     const FONTS = [
         {
             id: 'apple',
             label: '苹果系统默认',
-            stack: '-apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Helvetica Neue", "Microsoft YaHei", sans-serif'
+            stack: '-apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Helvetica Neue", "Microsoft YaHei", sans-serif',
+            probe: null // 系统字体，恒可用
+        },
+        {
+            id: 'harmony',
+            label: 'HarmonyOS Sans SC（中英同源·综合首选）',
+            stack: '"Inter", "HarmonyOS Sans SC", "HarmonyOS Sans", -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif',
+            probe: 'HarmonyOS Sans SC'
+        },
+        {
+            id: 'misans',
+            label: 'MiSans（现代 UI·数字清晰）',
+            stack: '"Inter", "MiSans", "MiSans VF", -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif',
+            probe: 'MiSans'
+        },
+        {
+            id: 'source',
+            label: '思源黑体 / Noto Sans SC（开源通用）',
+            stack: '"Inter", "Source Han Sans SC", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif',
+            probe: 'Source Han Sans SC'
+        },
+        {
+            id: 'alibaba',
+            label: '阿里巴巴普惠体 3.0（字重最全）',
+            stack: '"Inter", "Alibaba PuHuiTi 3.0", "Alibaba PuHuiTi", -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif',
+            probe: 'Alibaba PuHuiTi 3.0'
+        },
+        {
+            id: 'wenkai',
+            label: '霞鹜文楷（长文阅读向）',
+            stack: '"LXGW WenKai", "LXGW WenKai Screen", "Inter", "PingFang SC", "Songti SC", serif',
+            probe: 'LXGW WenKai'
         },
         {
             id: 'pingfang',
             label: '苹方 PingFang SC',
-            stack: '"PingFang SC", "Hiragino Sans GB", -apple-system, "Microsoft YaHei", sans-serif'
-        },
-        {
-            id: 'source',
-            label: '思源黑体 / Noto Sans SC',
-            stack: '"Source Han Sans SC", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif'
+            stack: '"PingFang SC", "Hiragino Sans GB", -apple-system, "Microsoft YaHei", sans-serif',
+            probe: 'PingFang SC'
         },
         {
             id: 'yahei',
             label: '微软雅黑',
-            stack: '"Microsoft YaHei", "PingFang SC", -apple-system, sans-serif'
-        },
-        {
-            id: 'wenkai',
-            label: '霞鹜文楷（阅读向）',
-            stack: '"LXGW WenKai", "LXGW WenKai Screen", "PingFang SC", "Microsoft YaHei", serif'
+            stack: '"Microsoft YaHei", "PingFang SC", -apple-system, sans-serif',
+            probe: 'Microsoft YaHei'
         }
     ];
 
@@ -148,6 +181,38 @@
     function colorOf(hex) {
         return COLORS.find((c) => c.hex === hex) || COLORS[0];
     }
+
+    // ========== 字体可用性检测 ==========
+    // 浏览器没有字体枚举 API，用 canvas 量文字宽度对比通用字体来反推：
+    // 若 "某字体, monospace" 的宽度和纯 monospace 不同，说明该字体确实被用上了。
+    const FONT_PROBE_TEXT = 'mmmmmmmmmmlli 中文字体测试 ABCabc0123';
+    const fontAvailCache = new Map();
+
+    function isFontAvailable(family) {
+        if (!family) return true;
+        if (fontAvailCache.has(family)) return fontAvailCache.get(family);
+
+        let ok = true;
+        try {
+            const ctx = document.createElement('canvas').getContext('2d');
+            if (ctx) {
+                const bases = ['monospace', 'serif', 'sans-serif'];
+                const measure = (font) => {
+                    ctx.font = `72px ${font}`;
+                    return ctx.measureText(FONT_PROBE_TEXT).width;
+                };
+                const baseWidths = bases.map((b) => measure(b));
+                ok = bases.some((b, i) => Math.abs(measure(`"${family}", ${b}`) - baseWidths[i]) > 0.1);
+            }
+        } catch (e) {
+            ok = true; // 检测失败就当可用，避免误报
+        }
+
+        fontAvailCache.set(family, ok);
+        return ok;
+    }
+
+    const isFontReady = (font) => isFontAvailable(font.probe);
 
     // 深色页面上强行染成深蓝色会直接看不见，这种情况下自动不覆盖颜色
     function luminance(colorStr) {
@@ -262,10 +327,23 @@
         );
 
         FONTS.forEach((f) => {
+            const ready = isFontReady(f);
+            const mark = settings.font === f.id ? '✓ ' : '　';
+            const suffix = ready ? '' : '（未安装）';
             add(
-                (settings.font === f.id ? '✓ ' : '　') + '字体：' + f.label,
-                change(() => { settings.font = f.id; }, '字体：' + f.label)
+                mark + '字体：' + f.label + suffix,
+                change(
+                    () => { settings.font = f.id; },
+                    ready ? '字体：' + f.label : `未检测到「${f.label.split('（')[0]}」，已回退到系统字体`
+                )
             );
+        });
+
+        add('🔍 检测本机字体可用性', () => {
+            const missing = FONTS.filter((f) => !isFontReady(f)).map((f) => f.label.split('（')[0]);
+            toast(missing.length
+                ? `缺少 ${missing.length} 款：${missing.join('、')}`
+                : '当前字体全部已安装');
         });
 
         COLORS.forEach((c) => {
@@ -306,7 +384,7 @@
             apply();
         }
 
-        console.log('[全局字体] v1.0.0 已加载：' + fontOf(settings.font).label + ' / ' + settings.color);
+        console.log('[全局字体] v1.1.0 已加载：' + fontOf(settings.font).label + ' / ' + settings.color);
     }
 
     bootstrap();
