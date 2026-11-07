@@ -35,8 +35,13 @@ class MyHandler(http.server.SimpleHTTPRequestHandler):
 
     def log_message(self, fmt, *args):
         # 只打印脚本相关请求，别把 favicon 之类刷满屏
-        if '.user.js' in (args[0] if args else ''):
-            sys.stderr.write("  → %s\n" % (args[0] if args else ''))
+        # 注意：send_error 时 args[0] 是 HTTPStatus 枚举，不能直接当字符串用
+        try:
+            msg = fmt % args if args else str(fmt)
+        except Exception:
+            msg = str(fmt)
+        if '.user.js' in msg:
+            sys.stderr.write("  → %s\n" % msg)
 
 
 class Server(socketserver.ThreadingTCPServer):
@@ -57,19 +62,21 @@ def start_server():
 
 if __name__ == '__main__':
     httpd, port = start_server()
-    install_url = "http://localhost:%d/yuanbao-helper.user.js" % port
     home_url = "http://localhost:%d/index.html" % port
+    scripts = sorted(f for f in os.listdir(DIRECTORY) if f.endswith('.user.js'))
+    script_lines = "\n".join("   - http://localhost:%d/%s" % (port, s) for s in scripts) or "   （目录下暂无 .user.js）"
 
     print("""
 ✅ 本地服务器已启动
 📁 服务目录: {d}
 
    安装页:   {h}
-   脚本地址: {u}
+   脚本地址:
+{s}
 
 ⚠️  这个终端窗口不能关，关掉服务器就停了
 ⏹️  按 Ctrl+C 停止
-""".format(d=DIRECTORY, h=home_url, u=install_url), flush=True)
+""".format(d=DIRECTORY, h=home_url, s=script_lines), flush=True)
 
     try:
         webbrowser.open(home_url)
