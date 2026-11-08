@@ -2,7 +2,7 @@
 // @name         扇贝单词助手 - Shanbay Words Helper
 // @namespace    http://tampermonkey.net/
 // @version      2.3.0
-// @description  扇贝单词网页版：英文例句 / 引文 / 短语点击朗读（本地神经语音 Kokoro，WebGPU 加速，离线可用），右下角齿轮可换音色与语速；例句与引文字号放大
+// @description  扇贝单词页 + 阅读页：英文句子点击朗读（本地神经语音 Kokoro，WebGPU 加速、离线可用），句尾/段尾/顶部三级喇叭，全文可导出 MP3；阅读页按英文报刊重排，中文译文不朗读
 // @author       You
 // @match        *://web.shanbay.com/*
 // @match        *://*.shanbay.com/wordsweb/*
@@ -12,6 +12,8 @@
 // @grant        GM_setValue
 // @noframes
 // @run-at       document-end
+// @updateURL    https://raw.githubusercontent.com/alphatok/monkey-script/main/shanbay-helper.user.js
+// @downloadURL  https://raw.githubusercontent.com/alphatok/monkey-script/main/shanbay-helper.user.js
 // ==/UserScript==
 
 (function () {
