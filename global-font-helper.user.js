@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         全局字体与文字颜色 - Global Font Helper
 // @namespace    http://tampermonkey.net/
-// @version      1.3.1
+// @version      1.3.2
 // @description  给所有网页统一设置字体与文字颜色：内置 8 套中英文友好字体栈（含 HarmonyOS Sans、MiSans、思源黑体、普惠体、霞鹜文楷），颜色默认 #0b214a，可在 Tampermonkey 菜单里随时切换，设置跨站持久生效；自动跳过页面里的深色区域（如元宝隐身模式的输入框）；可开启报纸模式（纸色底 + 衬线字 + 鼠标暖光）
 // @author       You
 // @match        *://*/*
@@ -177,21 +177,19 @@
             background-repeat: repeat;
             background-size: 160px 160px;
         }
-        /* 跟随鼠标的暖光：内层亮核 + 外层暖晕。
-           混合模式必须用 overlay：纸色是浅底，soft-light 只能提亮 4/255（肉眼等于没有），
-           而 screen 会把底下的墨色文字一起冲淡。overlay 对浅底提亮、对深色（文字）几乎不动，
-           正好是「光打在纸上、字还是黑的」。
-           两层渐变的半径都要小于容器半径，否则会在圆边上切出一道硬边。 */
+        /* 跟随鼠标的暖光。它挂在 #gfc-paper-layer 内部，不是压在最上层：
+           外层是 multiply，光晕在里面把纸色提亮到接近白，乘下去就等于「原样透出」，
+           于是纸面被擦亮、而压在下面的墨字完全不受影响——这是唯一能做到
+           「提亮纸、绝不给文字蒙白」的写法（overlay / screen 都会把字冲淡）。
+           注意：光晕只能活在纸层里，没有纸层就没有光。 */
         #gfc-glow {
-            position: fixed; left: 0; top: 0; width: 860px; height: 860px;
+            position: absolute; left: 0; top: 0; width: 860px; height: 860px;
             margin: -430px 0 0 -430px; border-radius: 50%;
-            pointer-events: none; z-index: 2147483001;
-            background:
-                radial-gradient(circle 260px at 50% 50%,
-                    rgba(255, 244, 214, 1) 0%, rgba(255, 240, 200, 0) 100%),
-                radial-gradient(circle 400px at 50% 50%,
-                    rgba(255, 210, 130, 0.7) 0%, rgba(255, 210, 130, 0) 100%);
-            mix-blend-mode: overlay;
+            pointer-events: none;
+            background: radial-gradient(circle 300px at 50% 50%,
+                rgba(255, 250, 236, 0.80) 0%,
+                rgba(255, 250, 236, 0.40) 55%,
+                rgba(255, 250, 236, 0) 100%);
             opacity: 0; transition: opacity 0.35s ease;
             will-change: transform;
         }
@@ -345,7 +343,7 @@
         html.classList.toggle('gfc-paper', paperOn);
 
         syncPaperLayer(paperOn);
-        syncGlow(settings.enabled && settings.glow);
+        syncGlow(paperOn && settings.glow);
 
         // 记下自己改完后的状态，属性观察器据此忽略自身引起的变动
         lastHtmlSnapshot = htmlSnapshot();
@@ -377,10 +375,18 @@
             if (glowEl) glowEl.style.opacity = '0';
             return;
         }
-        if (!glowEl) {
-            glowEl = document.createElement('div');
-            glowEl.id = GLOW_ID;
-            (document.documentElement || document.body).appendChild(glowEl);
+        // 光晕是「把纸擦亮」，必须挂在纸层里面；没有纸层就没什么可擦的
+        const layer = document.getElementById(PAPER_LAYER_ID);
+        if (!layer) {
+            if (glowEl) glowEl.style.opacity = '0';
+            return;
+        }
+        if (!glowEl || glowEl.parentNode !== layer) {
+            if (!glowEl) {
+                glowEl = document.createElement('div');
+                glowEl.id = GLOW_ID;
+            }
+            layer.appendChild(glowEl);
         }
         startGlowTracking();
     }
