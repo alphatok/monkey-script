@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         全局字体与文字颜色 - Global Font Helper
 // @namespace    http://tampermonkey.net/
-// @version      1.3.0
+// @version      1.3.1
 // @description  给所有网页统一设置字体与文字颜色：内置 8 套中英文友好字体栈（含 HarmonyOS Sans、MiSans、思源黑体、普惠体、霞鹜文楷），颜色默认 #0b214a，可在 Tampermonkey 菜单里随时切换，设置跨站持久生效；自动跳过页面里的深色区域（如元宝隐身模式的输入框）；可开启报纸模式（纸色底 + 衬线字 + 鼠标暖光）
 // @author       You
 // @match        *://*/*
@@ -177,16 +177,21 @@
             background-repeat: repeat;
             background-size: 160px 160px;
         }
-        /* 跟随鼠标的暖光：参考站的做法，径向渐变 + 软光混合 */
+        /* 跟随鼠标的暖光：内层亮核 + 外层暖晕。
+           混合模式必须用 overlay：纸色是浅底，soft-light 只能提亮 4/255（肉眼等于没有），
+           而 screen 会把底下的墨色文字一起冲淡。overlay 对浅底提亮、对深色（文字）几乎不动，
+           正好是「光打在纸上、字还是黑的」。
+           两层渐变的半径都要小于容器半径，否则会在圆边上切出一道硬边。 */
         #gfc-glow {
-            position: fixed; left: 0; top: 0; width: 640px; height: 640px;
-            margin: -320px 0 0 -320px; border-radius: 50%;
+            position: fixed; left: 0; top: 0; width: 860px; height: 860px;
+            margin: -430px 0 0 -430px; border-radius: 50%;
             pointer-events: none; z-index: 2147483001;
-            background: radial-gradient(circle,
-                rgba(255, 216, 156, 0.45) 0%,
-                rgba(255, 216, 156, 0.14) 45%,
-                rgba(255, 216, 156, 0) 72%);
-            mix-blend-mode: soft-light;
+            background:
+                radial-gradient(circle 260px at 50% 50%,
+                    rgba(255, 244, 214, 1) 0%, rgba(255, 240, 200, 0) 100%),
+                radial-gradient(circle 400px at 50% 50%,
+                    rgba(255, 210, 130, 0.7) 0%, rgba(255, 210, 130, 0) 100%);
+            mix-blend-mode: overlay;
             opacity: 0; transition: opacity 0.35s ease;
             will-change: transform;
         }
@@ -380,40 +385,44 @@
         startGlowTracking();
     }
 
-    // 和参考站一样：0.12 的缓动追着鼠标跑，别一帧贴上去
+    // 和参考站一样：0.12 的缓动追着鼠标跑，别一帧贴上去。
+    // 开了「减少动态效果」就不做缓动、直接贴到光标上——效果还在，只是不动画。
     function startGlowTracking() {
         if (glowTracking) return;
         glowTracking = true;
 
-        const fine = window.matchMedia('(pointer: fine)').matches;
         const calm = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-        if (!fine || calm) return; // 触屏 / 开了减少动态效果就别跟了
-
         let mx = 0, my = 0, gx = 0, gy = 0, raf = null, shown = false;
+
+        const place = () => {
+            glowEl.style.transform = 'translate3d(' + gx + 'px,' + gy + 'px,0)';
+        };
 
         const step = () => {
             gx += (mx - gx) * 0.12;
             gy += (my - gy) * 0.12;
-            glowEl.style.transform = 'translate3d(' + gx + 'px,' + gy + 'px,0)';
+            place();
             if (Math.abs(mx - gx) > 0.5 || Math.abs(my - gy) > 0.5) raf = requestAnimationFrame(step);
             else raf = null;
         };
 
-        document.addEventListener('mousemove', (e) => {
+        document.addEventListener('pointermove', (e) => {
+            if (e.pointerType === 'touch') return; // 手指跟着跑没意义，还挡内容
             mx = e.clientX;
             my = e.clientY;
-            if (!shown) { // 首次出现直接定位，避免从左上角飞过来
+            if (!shown || calm) { // 首次出现直接定位，避免从左上角飞过来
                 shown = true;
                 gx = mx;
                 gy = my;
+                place();
             }
             if (glowActive && glowEl) glowEl.style.opacity = '1';
-            if (!raf) raf = requestAnimationFrame(step);
+            if (!calm && !raf) raf = requestAnimationFrame(step);
         }, { passive: true });
 
-        document.addEventListener('mouseleave', () => {
-            if (glowEl) glowEl.style.opacity = '0';
-        });
+        const hide = () => { if (glowEl) glowEl.style.opacity = '0'; };
+        document.addEventListener('pointerleave', hide);
+        window.addEventListener('blur', hide);
     }
 
     // ========== 局部深色区域 ==========
@@ -634,7 +643,7 @@
             observePage();
         }
 
-        console.log('[全局字体] v1.3.0 已加载：' + fontOf(settings.font).label + ' / ' + settings.color
+        console.log('[全局字体] v1.3.1 已加载：' + fontOf(settings.font).label + ' / ' + settings.color
             + (settings.paper ? ' / 报纸模式' : ''));
     }
 
