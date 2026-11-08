@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         全局字体与文字颜色 - Global Font Helper
 // @namespace    http://tampermonkey.net/
-// @version      1.2.0
-// @description  给所有网页统一设置字体与文字颜色：内置 8 套中英文友好字体栈（含 HarmonyOS Sans、MiSans、思源黑体、普惠体、霞鹜文楷），颜色默认 #0b214a，可在 Tampermonkey 菜单里随时切换，设置跨站持久生效；自动跳过页面里的深色区域（如元宝隐身模式的输入框）
+// @version      1.3.0
+// @description  给所有网页统一设置字体与文字颜色：内置 8 套中英文友好字体栈（含 HarmonyOS Sans、MiSans、思源黑体、普惠体、霞鹜文楷），颜色默认 #0b214a，可在 Tampermonkey 菜单里随时切换，设置跨站持久生效；自动跳过页面里的深色区域（如元宝隐身模式的输入框）；可开启报纸模式（纸色底 + 衬线字 + 鼠标暖光）
 // @author       You
 // @match        *://*/*
 // @grant        GM_registerMenuCommand
@@ -89,16 +89,42 @@
         { hex: '#002f78', label: '宝蓝', rgb: '0, 47, 120' }
     ];
 
+    // 报纸模式：纸色（新闻纸那种偏黄的暖白，不是纯白）
+    // 后三个取自实拍旧报纸的纸面色，比纯色更接近「翻出来的旧报纸」
+    const PAPER_COLORS = [
+        { hex: '#f3ead8', label: '新闻纸（米黄）' },
+        { hex: '#fbf7ee', label: '象牙白' },
+        { hex: '#e8dac7', label: '复古报纸' },
+        { hex: '#e6daba', label: '泛黄报纸' },
+        { hex: '#eece9b', label: '旧报纸（深黄）' },
+        { hex: '#f1f1ec', label: '冷灰纸' },
+        { hex: '#e2d3b6', label: '牛皮纸' }
+    ];
+
+    // 纸纹：一层极淡的噪点，叠在纸色上，避免大面积纯色看着像 PPT 底色
+    const PAPER_GRAIN = "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E"
+        + "%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E"
+        + "%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E"
+        + "%3Crect width='160' height='160' filter='url(%23n)' opacity='0.05'/%3E%3C/svg%3E\")";
+
+    // 报纸字体：西文用 Times/Georgia 这类印刷衬线，中文落到思源宋体 / 宋体
+    const PAPER_FONT = '"Iowan Old Style", "Georgia", "Times New Roman", "Source Han Serif SC", "Noto Serif SC", "Songti SC", "SimSun", serif';
+
     const DEFAULTS = {
         enabled: true,
         font: 'apple',
         color: '#0b214a',
-        scope: 'smart' // smart = 跳过链接/按钮/代码等；all = 所有文字
+        scope: 'smart', // smart = 跳过链接/按钮/代码等；all = 所有文字
+        paper: true,    // 报纸模式：纸色底 + 衬线字
+        paperColor: PAPER_COLORS[0].hex,
+        glow: true      // 鼠标跟随暖光
     };
 
     const KEY = 'gfc.settings.v1';
     const STYLE_ID = 'gfc-style';
     const TOAST_ID = 'gfc-toast';
+    const PAPER_LAYER_ID = 'gfc-paper-layer';
+    const GLOW_ID = 'gfc-glow';
 
     // 图标字体常见类名，命中后不动它的 font-family，否则图标会变成方块
     const ICON_SELECTOR = ':not(i):not(svg):not(svg *):not([class~="fa"]):not([class*="fa-"]):not([class*="icon"]):not([class*="glyphicon"]):not([class*="material-symbols"]):not([class*="material-icons"]):not([class~="bi"]):not([class*="ri-"])';
@@ -134,6 +160,36 @@
         html.gfc-color[data-gfc-scope="all"] body :not(svg):not(svg *)${DARK_SELECTOR}${SELF_SELECTOR} {
             color: var(--gfc-color) !important;
         }
+
+        /* ========== 报纸模式 ========== */
+        /* 报纸字体：写在普通字体规则之后，同时开启时以衬线为准 */
+        html.gfc-paper body,
+        html.gfc-paper body ${ICON_SELECTOR}${MONO_SELECTOR} {
+            font-family: var(--gfc-paper-font) !important;
+        }
+        /* 纸色用 multiply 叠层铺满视口：白底变纸色，图片自然带一点旧纸调，
+           不动站点任何布局；深色页面由 JS 跳过（叠上去只会发闷）。
+           纸纹是一层极淡噪点，重复平铺，避免大面积纯色像 PPT 底色。 */
+        #gfc-paper-layer {
+            position: fixed; inset: 0; pointer-events: none;
+            z-index: 2147483000; mix-blend-mode: multiply;
+            background-image: var(--gfc-paper-grain);
+            background-repeat: repeat;
+            background-size: 160px 160px;
+        }
+        /* 跟随鼠标的暖光：参考站的做法，径向渐变 + 软光混合 */
+        #gfc-glow {
+            position: fixed; left: 0; top: 0; width: 640px; height: 640px;
+            margin: -320px 0 0 -320px; border-radius: 50%;
+            pointer-events: none; z-index: 2147483001;
+            background: radial-gradient(circle,
+                rgba(255, 216, 156, 0.45) 0%,
+                rgba(255, 216, 156, 0.14) 45%,
+                rgba(255, 216, 156, 0) 72%);
+            mix-blend-mode: soft-light;
+            opacity: 0; transition: opacity 0.35s ease;
+            will-change: transform;
+        }
     `;
 
     // ========== 设置读写（GM 存储，跨站生效） ==========
@@ -158,7 +214,10 @@
         if (!FONTS.some((f) => f.id === out.font)) out.font = DEFAULTS.font;
         if (!COLORS.some((c) => c.hex === out.color)) out.color = DEFAULTS.color;
         if (out.scope !== 'smart' && out.scope !== 'all') out.scope = DEFAULTS.scope;
+        if (!PAPER_COLORS.some((p) => p.hex === out.paperColor)) out.paperColor = DEFAULTS.paperColor;
         out.enabled = out.enabled !== false;
+        out.paper = out.paper !== false;
+        out.glow = out.glow !== false;
         return out;
     }
 
@@ -268,16 +327,93 @@
         if (!html) return;
 
         html.style.setProperty('--gfc-font', fontOf(settings.font).stack);
+        html.style.setProperty('--gfc-paper-font', PAPER_FONT);
+        html.style.setProperty('--gfc-paper-grain', PAPER_GRAIN);
         html.style.setProperty('--gfc-color', settings.color);
         html.dataset.gfcScope = settings.scope;
 
-        const wantColor = settings.enabled && !pageIsDark();
+        const light = !pageIsDark();
+        const wantColor = settings.enabled && light;
+        const paperOn = settings.enabled && settings.paper && light;
         html.classList.toggle('gfc-font', settings.enabled);
         html.classList.toggle('gfc-color', wantColor);
+        html.classList.toggle('gfc-paper', paperOn);
+
+        syncPaperLayer(paperOn);
+        syncGlow(settings.enabled && settings.glow);
 
         // 记下自己改完后的状态，属性观察器据此忽略自身引起的变动
         lastHtmlSnapshot = htmlSnapshot();
         scheduleScan();
+    }
+
+    // ========== 报纸模式：纸色叠层 + 鼠标暖光 ==========
+    let glowEl = null;
+    let glowTracking = false;
+    let glowActive = false;
+
+    function syncPaperLayer(on) {
+        let el = document.getElementById(PAPER_LAYER_ID);
+        if (!on) {
+            if (el) el.remove();
+            return;
+        }
+        if (!el) {
+            el = document.createElement('div');
+            el.id = PAPER_LAYER_ID;
+            (document.documentElement || document.body).appendChild(el);
+        }
+        el.style.backgroundColor = settings.paperColor;
+    }
+
+    function syncGlow(on) {
+        glowActive = on;
+        if (!on) {
+            if (glowEl) glowEl.style.opacity = '0';
+            return;
+        }
+        if (!glowEl) {
+            glowEl = document.createElement('div');
+            glowEl.id = GLOW_ID;
+            (document.documentElement || document.body).appendChild(glowEl);
+        }
+        startGlowTracking();
+    }
+
+    // 和参考站一样：0.12 的缓动追着鼠标跑，别一帧贴上去
+    function startGlowTracking() {
+        if (glowTracking) return;
+        glowTracking = true;
+
+        const fine = window.matchMedia('(pointer: fine)').matches;
+        const calm = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        if (!fine || calm) return; // 触屏 / 开了减少动态效果就别跟了
+
+        let mx = 0, my = 0, gx = 0, gy = 0, raf = null, shown = false;
+
+        const step = () => {
+            gx += (mx - gx) * 0.12;
+            gy += (my - gy) * 0.12;
+            glowEl.style.transform = 'translate3d(' + gx + 'px,' + gy + 'px,0)';
+            if (Math.abs(mx - gx) > 0.5 || Math.abs(my - gy) > 0.5) raf = requestAnimationFrame(step);
+            else raf = null;
+        };
+
+        document.addEventListener('mousemove', (e) => {
+            mx = e.clientX;
+            my = e.clientY;
+            if (!shown) { // 首次出现直接定位，避免从左上角飞过来
+                shown = true;
+                gx = mx;
+                gy = my;
+            }
+            if (glowActive && glowEl) glowEl.style.opacity = '1';
+            if (!raf) raf = requestAnimationFrame(step);
+        }, { passive: true });
+
+        document.addEventListener('mouseleave', () => {
+            if (glowEl) glowEl.style.opacity = '0';
+        });
     }
 
     // ========== 局部深色区域 ==========
@@ -453,12 +589,31 @@
             change(() => { settings.scope = 'all'; }, '颜色范围：全部文字')
         );
 
+        add(
+            (settings.paper ? '✓ ' : '　') + '报纸模式（纸色底 + 衬线字）',
+            change(() => { settings.paper = !settings.paper; },
+                settings.paper ? '已关闭报纸模式' : '已开启报纸模式')
+        );
+
+        PAPER_COLORS.forEach((p) => {
+            add(
+                (settings.paperColor === p.hex ? '✓ ' : '　') + `纸张：${p.label} ${p.hex}`,
+                change(() => { settings.paperColor = p.hex; }, `纸张：${p.label}`)
+            );
+        });
+
+        add(
+            (settings.glow ? '✓ ' : '　') + '鼠标光晕（悬浮跟随）',
+            change(() => { settings.glow = !settings.glow; },
+                settings.glow ? '已关闭鼠标光晕' : '已开启鼠标光晕')
+        );
+
         add('↺ 恢复默认设置', change(() => {
             settings = Object.assign({}, DEFAULTS);
         }, '已恢复默认设置'));
 
         add('ⓘ 当前设置：' + fontOf(settings.font).label + ' / ' + colorOf(settings.color).hex, () => {
-            toast(`${fontOf(settings.font).label} · ${colorOf(settings.color).hex} · 范围：${settings.scope === 'smart' ? '智能' : '全部'}`);
+            toast(`${fontOf(settings.font).label} · ${colorOf(settings.color).hex} · 范围：${settings.scope === 'smart' ? '智能' : '全部'} · 报纸${settings.paper ? '开' : '关'}`);
         });
     }
 
@@ -479,7 +634,8 @@
             observePage();
         }
 
-        console.log('[全局字体] v1.2.0 已加载：' + fontOf(settings.font).label + ' / ' + settings.color);
+        console.log('[全局字体] v1.3.0 已加载：' + fontOf(settings.font).label + ' / ' + settings.color
+            + (settings.paper ? ' / 报纸模式' : ''));
     }
 
     bootstrap();
