@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         扇贝单词助手 - Shanbay Words Helper
 // @namespace    http://tampermonkey.net/
-// @version      2.1.0
+// @version      2.2.0
 // @description  扇贝单词网页版：英文例句 / 引文 / 短语点击朗读（本地神经语音 Kokoro，WebGPU 加速，离线可用），右下角齿轮可换音色与语速；例句与引文字号放大
 // @author       You
 // @match        *://web.shanbay.com/*
@@ -175,6 +175,51 @@
         html.sb-read .sb-sent-gap { margin-right: .32em; }
         /* 正文里的链接保持原色，但别用蓝色下划线打断阅读节奏 */
         html.sb-read .sb-block a { text-decoration-thickness: 1px; text-underline-offset: 2px; }
+
+        /* ========== 三级小喇叭：全文 / 全段 / 单句 ========== */
+        /* 用真实元素而不是 ::after，因为要单独接点击事件。
+           宽度固定 18px，出现/消失不会让正文回流。 */
+        .sb-ic {
+            display: inline-block;
+            width: 18px; height: 18px;
+            margin: 0 2px;
+            vertical-align: -3px;
+            border-radius: 4px;
+            cursor: pointer;
+            background: ${SPEAKER_ICON} center / 13px 13px no-repeat;
+            opacity: .28;
+            transition: opacity .15s ease, background-color .15s ease;
+            -webkit-user-select: none; user-select: none;
+        }
+        .sb-ic:hover { opacity: 1; background-color: rgba(32, 158, 133, .12); }
+        /* 整段的图标挂在段尾，比单句的大一号、也更实一点，别和最后一句的图标混在一起 */
+        .sb-ic-para {
+            width: 20px; height: 20px;
+            margin-left: 10px;
+            background-size: 15px 15px;
+            opacity: .34;
+        }
+        /* 正在读的那句/那段：图标跟着亮起来 */
+        .sb-block.sb-speaking .sb-ic { opacity: .9; }
+
+        /* 全文朗读：固定右下角，紧挨着设置齿轮（齿轮 right:20px） */
+        .sb-ic-article {
+            position: fixed; right: 74px; bottom: 20px; z-index: 2147483001;
+            width: 42px; height: 42px; margin: 0; border-radius: 50%;
+            background-color: #fff;
+            background-position: center;
+            background-size: 19px 19px;
+            border: 1px solid #e2eae7;
+            box-shadow: 0 4px 16px rgba(0, 0, 0, .12);
+            opacity: 1;
+        }
+        .sb-ic-article:hover { background-color: #f2f9f7; }
+        .sb-ic-article.on {
+            border-color: #147864;
+            box-shadow: 0 0 0 2px rgba(20, 120, 100, .35), 0 4px 16px rgba(0, 0, 0, .12);
+        }
+        html[data-theme="dark"] .sb-ic-article { background-color: #1c2422; border-color: #2e3a37; }
+        html[data-theme="dark"] .sb-ic-article:hover { background-color: #24302d; }
 
         /* ========== 朗读提示 ========== */
         ${speakRule('')} { cursor: pointer; }
@@ -691,9 +736,64 @@
     }
 
     function clearArticle() {
-        articleBlocks.forEach((el) => el.classList.remove('sb-block'));
+        articleBlocks.forEach((el) => {
+            el.classList.remove('sb-block', 'sb-speaking');
+            el.querySelectorAll('.sb-ic').forEach((ic) => ic.remove());
+        });
+        document.querySelectorAll('.sb-ic-sent').forEach((ic) => ic.remove());
         articleBlocks = [];
         document.documentElement.classList.remove('sb-read');
+        syncArticleButton();
+    }
+
+    // ---------- 三级小喇叭 ----------
+    // 全文（右下角固定）/ 全段（段尾）/ 单句（每个句子后面）
+    // 用真实元素而不是 ::after：要单独接点击事件；宽度固定，出现消失不回流。
+    let articleBtn = null;
+
+    function makeIcon(kind, title) {
+        const el = document.createElement('span');
+        el.className = 'sb-ic sb-ic-' + kind;
+        el.setAttribute('role', 'button');
+        el.title = title;
+        return el;
+    }
+
+    function syncArticleButton() {
+        const show = isReadingPage() && articleBlocks.length > 0;
+        if (!show) {
+            if (articleBtn) { articleBtn.remove(); articleBtn = null; }
+            return;
+        }
+        if (!articleBtn) {
+            articleBtn = makeIcon('article', '朗读全文');
+            (document.body || document.documentElement).appendChild(articleBtn);
+        }
+        articleBtn.classList.toggle('on', readingAll);
+        articleBtn.title = readingAll ? '停止朗读（' + readProgress.done + '/' + readProgress.total + '）' : '朗读全文';
+    }
+
+    // 给每个段落挂「整段」图标，给每个句子挂「单句」图标。
+    // 只插在句子 span 之后，不碰文本节点；React 重渲染冲掉了就再补一次。
+    function decorateArticle() {
+        articleBlocks.forEach((block) => {
+            if (!block.querySelector(':scope > .sb-ic-para')) {
+                block.appendChild(makeIcon('para', '朗读整段'));
+            }
+            const kids = block.children;
+            for (let i = 0; i < kids.length; i++) {
+                const el = kids[i];
+                if (el.classList.contains('sb-ic')) continue;
+                const t = (el.textContent || '').trim();
+                if (t.length < 2 || !/[.!?"'”’)\]]$/.test(t)) continue;
+                const nx = el.nextElementSibling;
+                if (nx && nx.classList.contains('sb-ic-sent')) continue;
+                const ic = makeIcon('sent', '朗读这句');
+                ic.__sbText = t;
+                el.parentNode.insertBefore(ic, el.nextSibling);
+            }
+        });
+        syncArticleButton();
     }
 
     // 站点把每句话渲染成独立的行内元素（<sent> → span），句间不补空格，
@@ -743,17 +843,20 @@
             updateUI();
             return;
         }
-        if (found.length === articleBlocks.length && found.every((el, i) => el === articleBlocks[i])) return;
-
-        clearArticle();
-        articleBlocks = found;
-        found.forEach((el) => {
-            el.classList.add('sb-block');
-            // 标成英文：断词（hyphens:auto）和读屏发音都靠它，站点默认是 zh-CN
-            if (el.getAttribute('lang') !== 'en') el.setAttribute('lang', 'en');
-            fixSentenceSpacing(el);
-        });
-        document.documentElement.classList.add('sb-read');
+        const same = found.length === articleBlocks.length && found.every((el, i) => el === articleBlocks[i]);
+        if (!same) {
+            clearArticle();
+            articleBlocks = found;
+            found.forEach((el) => {
+                el.classList.add('sb-block');
+                // 标成英文：断词（hyphens:auto）和读屏发音都靠它，站点默认是 zh-CN
+                if (el.getAttribute('lang') !== 'en') el.setAttribute('lang', 'en');
+                fixSentenceSpacing(el);
+            });
+            document.documentElement.classList.add('sb-read');
+        }
+        // 段落没变也要补图标：React 重渲染会把插进去的图标冲掉
+        decorateArticle();
         updateUI();
     }
 
@@ -796,6 +899,18 @@
             out.push({ start: p.start, text: p.text });
         });
         return out;
+    }
+
+    // 取整段文本给语音用。不能直接 block.textContent：句子是独立 span，
+    // textContent 拼出来是 "…October 15.Starting in January…"，念起来会黏在一起。
+    // 按子节点取再补空格，行内标签（<b>）造成的多余空格由 \s+ 折叠掉。
+    function blockText(block) {
+        const parts = [];
+        block.childNodes.forEach((n) => {
+            if (n.nodeType === 3) parts.push(n.nodeValue || '');
+            else if (n.nodeType === 1 && !n.classList.contains('sb-ic')) parts.push(n.textContent || '');
+        });
+        return parts.join(' ').replace(/\s+/g, ' ').trim();
     }
 
     // 点在哪一句就读哪一句：用 caretRangeFromPoint 拿到字符偏移，再按句切
@@ -890,7 +1005,7 @@
         readProgress = { done: 0, total: blocks.length };
         updateUI();
 
-        const texts = blocks.map((b) => (b.textContent || '').replace(/\s+/g, ' ').trim());
+        const texts = blocks.map(blockText);
 
         try {
             if (settings.engine === 'system') {
@@ -1000,6 +1115,27 @@
         document.addEventListener('click', (e) => {
             if (!settings.speak) return;
             if (!(e.target instanceof Element)) return;
+
+            // 小喇叭：全文 / 全段 / 单句。先拦下来，别让站点的点击逻辑跟着跑
+            const ic = e.target.closest('.sb-ic');
+            if (ic) {
+                e.preventDefault();
+                e.stopPropagation();
+                if (ic.classList.contains('sb-ic-article')) {
+                    readArticle();
+                    return;
+                }
+                if (ic.classList.contains('sb-ic-para')) {
+                    const block = ic.closest('.sb-block');
+                    if (block) speak(blockText(block), block);
+                    return;
+                }
+                const prev = ic.previousElementSibling;
+                const text = (ic.__sbText || (prev ? prev.textContent : '') || '').trim();
+                if (text && /[a-zA-Z]/.test(text)) speak(text, prev || ic);
+                return;
+            }
+
             if (e.target.closest('a, button, input, textarea, select, [contenteditable="true"]')) return;
 
             // 划词选择时不朗读
@@ -1412,11 +1548,13 @@
         if (!ui.readall) return;
         const show = isReadingPage() && articleBlocks.length > 0;
         ui.readall.hidden = !show;
-        if (!show) return;
-        ui.readall.textContent = readingAll
-            ? '停止（' + readProgress.done + '/' + readProgress.total + '）'
-            : '朗读全文';
-        ui.readall.classList.toggle('primary', readingAll);
+        if (show) {
+            ui.readall.textContent = readingAll
+                ? '停止（' + readProgress.done + '/' + readProgress.total + '）'
+                : '朗读全文';
+            ui.readall.classList.toggle('primary', readingAll);
+        }
+        syncArticleButton();
     }
 
     // 首次点朗读但模型没下载：面板里的「试听」就是下载入口，
@@ -1553,7 +1691,7 @@
             articleObsTimer = setTimeout(scanArticle, 1200);
         }).observe(document.body, { childList: true, subtree: true });
 
-        console.log('[扇贝助手] v2.1.0 已加载：' + settings.engine + ' / ' + settings.rate + 'x');
+        console.log('[扇贝助手] v2.2.0 已加载：' + settings.engine + ' / ' + settings.rate + 'x');
     }
 
     if (document.readyState === 'loading') {
