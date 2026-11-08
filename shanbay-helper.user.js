@@ -278,7 +278,10 @@
         ttsPromise = (async () => {
             const mod = await import(/* @vite-ignore */ KOKORO_CDN);
 
-            // 有 WebGPU 就走 GPU（0.3s/句），否则退回 WASM（约 1.4x 实时，慢但能听）
+            // 有 WebGPU 就走 GPU，否则退回 WASM。
+            // 注意 dtype 必须是 fp32：fp16 在这套模型上会把声码器算坏，
+            // 输出整段 0~12kHz 的宽带噪声（听感就是「刺刺声」），
+            // 实测 fp32 和 q8 的频谱都干净。代价是模型 310MB vs 155MB。
             let device = 'wasm';
             let dtype = 'q8';
             if (navigator.gpu) {
@@ -286,7 +289,7 @@
                     const adapter = await navigator.gpu.requestAdapter();
                     if (adapter) {
                         device = 'webgpu';
-                        dtype = 'fp16';
+                        dtype = 'fp32';
                     }
                 } catch (e) { /* 没 GPU 就用 CPU */ }
             }
@@ -303,7 +306,7 @@
                 ttsDevice = device;
             } catch (e) {
                 if (device !== 'webgpu') throw e;
-                // GPU 初始化失败（驱动/显存）时退回 WASM 再来一次
+                // GPU 初始化失败（驱动/显存不够）时退回 WASM，慢但能听
                 device = 'wasm';
                 dtype = 'q8';
                 loadPct = 0;
@@ -317,6 +320,7 @@
             saveSettings();
             updateUI();
             refreshCacheCount();
+            purgeStaleModels(ttsDevice === 'webgpu' ? 'model.onnx' : 'model_quantized.onnx');
             toast('高质量语音已就绪（' + ttsDevice + '）');
             return tts;
         })();
@@ -330,6 +334,37 @@
             updateUI();
             throw e;
         }
+    }
+
+    // 自己写 16bit PCM 的 WAV：库自带的 toBlob() 是 32bit float，
+    // 体积翻倍，个别环境下播放器解码还会出怪声。16bit 到处都认，缓存也小一半。
+    function encodeWav16(samples, sampleRate) {
+        const len = samples.length;
+        const buf = new ArrayBuffer(44 + len * 2);
+        const view = new DataView(buf);
+        const str = (off, s) => {
+            for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i));
+        };
+        str(0, 'RIFF');
+        view.setUint32(4, 36 + len * 2, true);
+        str(8, 'WAVE');
+        str(12, 'fmt ');
+        view.setUint32(16, 16, true);        // fmt chunk 长度
+        view.setUint16(20, 1, true);         // PCM
+        view.setUint16(22, 1, true);         // 单声道
+        view.setUint32(24, sampleRate, true);
+        view.setUint32(28, sampleRate * 2, true); // 字节率
+        view.setUint16(32, 2, true);         // block align
+        view.setUint16(34, 16, true);        // 位深
+        str(36, 'data');
+        view.setUint32(40, len * 2, true);
+        let off = 44;
+        for (let i = 0; i < len; i++) {
+            const s = Math.max(-1, Math.min(1, samples[i]));
+            view.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+            off += 2;
+        }
+        return new Blob([buf], { type: 'audio/wav' });
     }
 
     async function synth(text) {
@@ -346,7 +381,7 @@
 
         const model = await ensureModel();
         const audio = await model.generate(text, { voice: settings.voice, speed: settings.rate });
-        const blob = audio.toBlob();
+        const blob = encodeWav16(audio.audio, audio.sampling_rate);
         const url = URL.createObjectURL(blob);
         remember(key, url);
         idbPut(key, blob);
@@ -366,7 +401,7 @@
         }
     }
 
-    // 模型是不是已经在浏览器缓存里（transformers.js 存在 Cache Storage）
+    // 模型是否已缓存在浏览器里（transformers.js 存在 Cache Storage）
     async function modelInCache() {
         try {
             const names = await caches.keys();
@@ -379,10 +414,29 @@
         return false;
     }
 
+    // 换过 dtype 之后，旧精度的模型文件还赖在缓存里（fp16 那份 155MB）。
+    // 只删明确没用到的变体，当前在用的那个不碰。
+    async function purgeStaleModels(keep) {
+        const stale = ['model_fp16.onnx', 'model_q8f16.onnx', 'model_q4.onnx', 'model_q4f16.onnx',
+            'model_uint8.onnx', 'model_uint8f16.onnx', 'model_quantized.onnx', 'model.onnx']
+            .filter((f) => f !== keep);
+        try {
+            const names = await caches.keys();
+            for (const name of names) {
+                const cache = await caches.open(name);
+                const keys = await cache.keys();
+                for (const req of keys) {
+                    if (req.url.indexOf('Kokoro-82M') < 0) continue;
+                    if (stale.some((f) => req.url.indexOf(f) >= 0)) await cache.delete(req);
+                }
+            }
+        } catch (e) { /* 删不掉就算了 */ }
+    }
+
     // 模型已经在本地缓存过的话，空闲时先热一下，首次点击就不用等 1 秒
     async function warmUp() {
         if (settings.engine !== 'neural' || ttsState !== 'idle' || !settings.modelCached) return;
-        if (!(await modelInCache())) return; // 缓存没了就别偷偷重下 155MB
+        if (!(await modelInCache())) return; // 缓存没了就别偷偷重下整个模型
         ensureModel().catch(() => {});
     }
 
@@ -404,7 +458,8 @@
         clearHighlight();
         try {
             audioEl.pause();
-            audioEl.currentTime = 0;
+            audioEl.removeAttribute('src');
+            audioEl.load();   // 彻底放掉上一段 buffer，避免残留音轨
         } catch (e) { /* ignore */ }
         try {
             window.speechSynthesis.cancel();
@@ -468,6 +523,7 @@
         u.lang = (voice && voice.lang) || 'en-US';
         if (voice) u.voice = voice;
         u.rate = settings.rate;
+        u.volume = 1;
         u.onstart = () => {
             if (myGen !== gen) return;
             if (el) {
@@ -478,7 +534,16 @@
         u.onend = u.onerror = () => {
             if (myGen === gen) clearHighlight();
         };
-        synth.speak(u);
+        // Chrome 的老毛病：cancel() 之后同一帧 speak()，新句子会从中间起播、
+        // 或者叠着上一句的尾巴，听感就是「刺刺」的杂音。隔一帧再说话，
+        // 顺便 resume() 一下——cancel 之后合成器有时会停在暂停态。
+        setTimeout(() => {
+            if (myGen !== gen) return;
+            try {
+                synth.resume();
+            } catch (e) { /* ignore */ }
+            synth.speak(u);
+        }, 120);
     }
 
     // ========== 统一入口 ==========
@@ -514,7 +579,7 @@
                 });
                 return;
             }
-            // 从没下过：别悄悄拉 155MB，弹面板等用户点「下载并试听」
+            // 从没下过：别悄悄拉几百 MB，弹面板等用户点「下载并试听」
             pendingAfterLoad = { text, el };
             openPanel();
             updateUI();
@@ -545,7 +610,7 @@
     }
 
     // 试听按钮同时也是「首次下载」的入口：点它才真正去拉模型，
-    // 免得用户只是点了个句子就被偷偷下 155MB。
+    // 免得用户只是点了个句子就被偷偷下几百 MB。
     const SAMPLE = 'The only way to do great work is to love what you do.';
 
     async function preview() {
@@ -872,6 +937,21 @@
     }
 
     let cacheCount = 0;
+    let gpuReady = false;
+
+    async function detectGPU() {
+        if (!navigator.gpu) return false;
+        try {
+            return !!(await navigator.gpu.requestAdapter());
+        } catch (e) {
+            return false;
+        }
+    }
+
+    // 有 GPU 用 fp32（310MB），没有就退到 q8（88MB，慢但能听）
+    function sizeLabel() {
+        return gpuReady ? '310MB' : '88MB';
+    }
 
     async function refreshCacheCount() {
         cacheCount = await idbCount();
@@ -941,7 +1021,7 @@
                 + ' · 已缓存 ' + cacheCount + ' 句';
             ui.hint.textContent = '生成的音频会存本地，重复播放零等待。';
         } else if (ttsState === 'loading') {
-            ui.status.textContent = '正在下载语音模型 ' + loadPct + '% …（首次约 155MB，之后离线可用）';
+            ui.status.textContent = '正在下载语音模型 ' + loadPct + '% …（首次约 ' + sizeLabel() + '，之后离线可用）';
             ui.hint.textContent = '下载期间可以继续用系统语音。';
         } else if (ttsState === 'error') {
             ui.status.textContent = '模型加载失败：' + ttsError;
@@ -950,7 +1030,7 @@
             ui.status.textContent = '模型已下载 · 点句子会自动加载（约 1 秒）';
             ui.hint.textContent = '浏览器清过缓存的话会重新下载一次。';
         } else {
-            ui.status.textContent = '神经语音未下载 · 首次约 155MB，之后离线可用';
+            ui.status.textContent = '神经语音未下载 · 首次约 ' + sizeLabel() + '，之后离线可用';
             ui.hint.textContent = '点「下载并试听」开始下载。';
         }
         syncPrimaryLabel();
@@ -1054,6 +1134,12 @@
 
         // 之前用过神经语音的话，页面空闲时把模型预热起来
         setTimeout(warmUp, 1500);
+
+        // 探测 WebGPU，用来决定下载体积和推理设备
+        detectGPU().then((v) => {
+            gpuReady = v;
+            updateUI();
+        });
 
         if (window.speechSynthesis) {
             window.speechSynthesis.onvoiceschanged = () => {
