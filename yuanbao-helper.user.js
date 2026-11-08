@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         元宝助手 - Yuanbao Helper
 // @namespace    http://tampermonkey.net/
-// @version      1.5.0
+// @version      1.6.0
 // @description  腾讯元宝聊天页面增强：布局密度（默认/紧凑/宽松）、聊天区加宽、快捷键发送、自动聚焦、界面精简、会话一键删除
 // @author       You
 // @match        https://yuanbao.tencent.com/chat/*
@@ -480,20 +480,29 @@
         html.yb-density-compact .agent-dialogue__content--common-new .agent-chat__list__item .agent-chat__bubble__avatar {
             margin-bottom: 18px;
         }
-        /* 正文排版：原生 line-height 1.7 / 段落 16px / 列表项 10px */
-        html.yb-density-compact .hyc-common-markdown-style p,
-        html.yb-density-compact .hyc-common-markdown-style .ybc-p {
-            line-height: 1.55; margin-top: 8px; margin-bottom: 8px;
+        /* 正文排版：原生 line-height 1.7 / 段落上下 16px / 列表项 10px。
+           不能只认 .hyc-common-markdown-style：普通会话用它，项目会话、深度思考、
+           卡片里换成了 -cot 或别的渲染器，按容器类名写就会漏掉一整块聊天区。
+           这里改成按「气泡里的正文元素」匹配，容器是谁都盖得住；表格单元格本来就不要外边距。 */
+        html.yb-density-compact :is(.agent-chat__bubble, .hyc-common-markdown-style, .hyc-common-markdown-style-cot) {
+            line-height: 1.5;
         }
-        html.yb-density-compact .hyc-common-markdown-style ul,
-        html.yb-density-compact .hyc-common-markdown-style ol { margin-top: 8px; margin-bottom: 8px; }
-        html.yb-density-compact .hyc-common-markdown-style li { margin-bottom: 4px; }
-        html.yb-density-compact .hyc-common-markdown-style h3,
-        html.yb-density-compact .hyc-common-markdown-style h4,
-        html.yb-density-compact .hyc-common-markdown-style h5,
-        html.yb-density-compact .hyc-common-markdown-style h6 { margin-top: 12px; margin-bottom: 8px; }
-        html.yb-density-compact .hyc-common-markdown-style blockquote { margin-top: 8px; margin-bottom: 8px; }
-        html.yb-density-compact .hyc-common-markdown-style .hyc-common-markdown__img {
+        html.yb-density-compact :is(.agent-chat__bubble__content, .agent-chat__list, .agent-dialogue__content, .hyc-common-markdown-style, .hyc-common-markdown-style-cot) :is(p, .ybc-p):not(td *):not(th *) {
+            line-height: 1.5; margin-top: 6px; margin-bottom: 6px;
+        }
+        html.yb-density-compact :is(.agent-chat__bubble__content, .agent-chat__list, .agent-dialogue__content, .hyc-common-markdown-style, .hyc-common-markdown-style-cot) :is(ul, ol) {
+            margin-top: 8px; margin-bottom: 8px;
+        }
+        html.yb-density-compact :is(.agent-chat__bubble__content, .agent-chat__list, .agent-dialogue__content, .hyc-common-markdown-style, .hyc-common-markdown-style-cot) li {
+            margin-bottom: 4px;
+        }
+        html.yb-density-compact :is(.agent-chat__bubble__content, .agent-dialogue__content, .hyc-common-markdown-style, .hyc-common-markdown-style-cot) :is(h1, h2, h3, h4, h5, h6) {
+            margin-top: 12px; margin-bottom: 8px;
+        }
+        html.yb-density-compact :is(.agent-chat__bubble__content, .agent-dialogue__content, .hyc-common-markdown-style, .hyc-common-markdown-style-cot) blockquote {
+            margin-top: 8px; margin-bottom: 8px;
+        }
+        html.yb-density-compact :is(.agent-chat__bubble__content, .agent-dialogue__content, .hyc-common-markdown-style, .hyc-common-markdown-style-cot) .hyc-common-markdown__img {
             margin-top: 8px; margin-bottom: 8px;
         }
 
@@ -505,13 +514,18 @@
         html.yb-density-loose .agent-dialogue__content--common-new .agent-chat__list__item .agent-chat__bubble__avatar {
             margin-bottom: 44px;
         }
-        html.yb-density-loose .hyc-common-markdown-style p,
-        html.yb-density-loose .hyc-common-markdown-style .ybc-p {
+        html.yb-density-loose :is(.agent-chat__bubble, .hyc-common-markdown-style, .hyc-common-markdown-style-cot) {
+            line-height: 1.9;
+        }
+        html.yb-density-loose :is(.agent-chat__bubble__content, .agent-chat__list, .agent-dialogue__content, .hyc-common-markdown-style, .hyc-common-markdown-style-cot) :is(p, .ybc-p):not(td *):not(th *) {
             line-height: 1.9; margin-top: 20px; margin-bottom: 20px;
         }
-        html.yb-density-loose .hyc-common-markdown-style ul,
-        html.yb-density-loose .hyc-common-markdown-style ol { margin-top: 20px; margin-bottom: 20px; }
-        html.yb-density-loose .hyc-common-markdown-style li { margin-bottom: 12px; }
+        html.yb-density-loose :is(.agent-chat__bubble__content, .agent-chat__list, .agent-dialogue__content, .hyc-common-markdown-style, .hyc-common-markdown-style-cot) :is(ul, ol) {
+            margin-top: 20px; margin-bottom: 20px;
+        }
+        html.yb-density-loose :is(.agent-chat__bubble__content, .agent-chat__list, .agent-dialogue__content, .hyc-common-markdown-style, .hyc-common-markdown-style-cot) li {
+            margin-bottom: 12px;
+        }
 
         /* ========== 聊天区加宽 ========== */
         /* 聊天列表和输入框都吃这一个变量，输入框宽度是 calc 出来的，会自动跟着变 */
