@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         扇贝单词助手 - Shanbay Words Helper
 // @namespace    http://tampermonkey.net/
-// @version      2.0.0
+// @version      2.1.0
 // @description  扇贝单词网页版：英文例句 / 引文 / 短语点击朗读（本地神经语音 Kokoro，WebGPU 加速，离线可用），右下角齿轮可换音色与语速；例句与引文字号放大
 // @author       You
 // @match        *://web.shanbay.com/*
@@ -54,6 +54,12 @@
     const UI_ID = 'sb-helper-ui';
     const DB_NAME = 'sb-helper';
     const DB_STORE = 'audio';
+
+    // 音频缓存的「配方版本」。生成链路一变（换模型精度、换编码、换后处理）就 +1，
+    // 老缓存全部作废。之前踩过的坑：fp16 那版模型生成的是宽带噪声（听感像刺刺的电流声），
+    // 修好之后用户还是听到老声音——因为 cacheKey 只按 voice|rate|text 命中，
+    // IndexedDB 里存着修复前的坏音频。版本号进 key，这类问题就不会再复发。
+    const TTS_REV = 'v3';
 
     // ========== 设置 ==========
     const hasGM = typeof GM_getValue === 'function' && typeof GM_setValue === 'function';
@@ -143,6 +149,32 @@
         }
         html.sb-big [class*="phraseContent"] { font-size: 17px !important; }
         html.sb-big [class*="index_sense"] { font-size: 15px !important; line-height: 1.7 !important; }
+
+        /* ========== 阅读页正文排版 ========== */
+        /* 扇贝阅读是另一个 SPA，类名同样是构建哈希，不能靠类名认正文，
+           所以由 JS 按内容给段落打 .sb-block，这里只管排版。
+           参考英文报刊：衬线正文、19px/1.72、段间距约一行、行长 40em（≈70 字符）。
+           行高和段间距是「读得下去」的关键——原生 1.4 + 紧贴的段落读长文很累。 */
+        html.sb-read .sb-block {
+            font-family: "Charter", "Iowan Old Style", "Georgia", "Times New Roman", "Source Serif SC", "Songti SC", serif !important;
+            font-size: 19px !important;
+            line-height: 1.72 !important;
+            letter-spacing: .003em !important;
+            word-spacing: .05em !important;
+            text-align: left !important;
+            text-indent: 0 !important;
+            hyphens: auto !important;
+            -webkit-hyphens: auto !important;
+            max-width: 40em;
+            margin: 0 auto 1.05em !important;
+        }
+        /* 段落之间统一由上面的 margin-bottom 控制，别叠加站点自己的 margin-top */
+        html.sb-read .sb-block + .sb-block { margin-top: 0 !important; }
+        /* 站点把每句话渲染成独立 span，句与句之间不补空格，读起来像 "cup.Next year"。
+           只补视觉间距，不动文本节点，React 重渲染也不会打架。 */
+        html.sb-read .sb-sent-gap { margin-right: .32em; }
+        /* 正文里的链接保持原色，但别用蓝色下划线打断阅读节奏 */
+        html.sb-read .sb-block a { text-decoration-thickness: 1px; text-underline-offset: 2px; }
 
         /* ========== 朗读提示 ========== */
         ${speakRule('')} { cursor: pointer; }
@@ -250,6 +282,32 @@
         });
     }
 
+    // 清掉旧配方版本的音频（key 不以当前 TTS_REV 开头的一律删掉）
+    async function idbPurgeOld() {
+        const db = await openDB();
+        if (!db) return 0;
+        const prefix = TTS_REV + '|';
+        return new Promise((resolve) => {
+            let n = 0;
+            try {
+                const store = db.transaction(DB_STORE, 'readwrite').objectStore(DB_STORE);
+                const req = store.openKeyCursor();
+                req.onsuccess = () => {
+                    const cur = req.result;
+                    if (!cur) { resolve(n); return; }
+                    if (typeof cur.key === 'string' && cur.key.indexOf(prefix) !== 0) {
+                        store.delete(cur.key);
+                        n++;
+                    }
+                    cur.continue();
+                };
+                req.onerror = () => resolve(n);
+            } catch (e) {
+                resolve(n);
+            }
+        });
+    }
+
     // ========== 神经语音引擎 ==========
     let tts = null;              // KokoroTTS 实例
     let ttsPromise = null;       // 加载中的 promise
@@ -263,7 +321,7 @@
     const CACHE_LIMIT = 80;
 
     function cacheKey(text) {
-        return settings.voice + '|' + settings.rate.toFixed(2) + '|' + text;
+        return TTS_REV + '|' + settings.voice + '|' + settings.rate.toFixed(2) + '|' + text;
     }
 
     async function ensureModel() {
@@ -367,16 +425,18 @@
         return new Blob([buf], { type: 'audio/wav' });
     }
 
-    async function synth(text) {
+    async function synth(text, fresh) {
         const key = cacheKey(text);
-        const hit = blobCache.get(key);
-        if (hit) return hit;
+        if (!fresh) {
+            const hit = blobCache.get(key);
+            if (hit) return hit;
 
-        const saved = await idbGet(key);
-        if (saved) {
-            const url = URL.createObjectURL(saved);
-            remember(key, url);
-            return url;
+            const saved = await idbGet(key);
+            if (saved) {
+                const url = URL.createObjectURL(saved);
+                remember(key, url);
+                return url;
+            }
         }
 
         const model = await ensureModel();
@@ -547,7 +607,7 @@
     }
 
     // ========== 统一入口 ==========
-    async function speak(text, el) {
+    async function speak(text, el, opts) {
         if (!text) return;
 
         // 再点同一句 = 停止
@@ -592,7 +652,7 @@
         }
         setBusy(true);
         try {
-            const url = await synth(text);
+            const url = await synth(text, !!(opts && opts.fresh));
             if (myGen !== gen) return;
             playUrl(url, el, myGen);
         } catch (e) {
@@ -606,6 +666,287 @@
             speakSystem(text, el);
         } finally {
             setBusy(false);
+        }
+    }
+
+    // ========== 阅读文章（/reading/） ==========
+    // 阅读页要登录，拿不到固定类名，所以不猜类名，按内容找：
+    // 页面上「叶子块级元素 + 主要是英文 + 够长」的那些就是正文段落。
+    const ARTICLE_MIN_BLOCKS = 2;
+    const ARTICLE_MIN_CHARS = 200;
+
+    let articleBlocks = [];
+    let readingAll = false;
+    let playResolve = null;
+    let readProgress = { done: 0, total: 0 };
+
+    function isReadingPage() {
+        return location.pathname.indexOf('/reading/') >= 0;
+    }
+
+    function looksEnglish(text) {
+        if (!text || text.length < 15) return false;
+        const letters = (text.match(/[A-Za-z]/g) || []).length;
+        return letters / text.length >= 0.55;
+    }
+
+    function clearArticle() {
+        articleBlocks.forEach((el) => el.classList.remove('sb-block'));
+        articleBlocks = [];
+        document.documentElement.classList.remove('sb-read');
+    }
+
+    // 站点把每句话渲染成独立的行内元素（<sent> → span），句间不补空格，
+    // 于是 "…Pepsi in the cup.Next year…" 黏在一起。这里只加一个 class 补视觉间距：
+    // 不动文本节点，React 重渲染不会把它冲掉，也不会把空格念进语音里。
+    function fixSentenceSpacing(block) {
+        const kids = block.children;
+        for (let i = 0; i < kids.length - 1; i++) {
+            const cur = kids[i];
+            const next = kids[i + 1];
+            const a = (cur.textContent || '');
+            const b = (next.textContent || '');
+            if (!a.trim() || !b) continue;
+            if (/\s$/.test(a) || /^\s/.test(b)) continue;      // 两边谁带空格都不用补
+            // 两个 span 之间夹着空白文本节点 → 站点已经补过空格，别再叠一层
+            let hasGapNode = false;
+            for (let n = cur.nextSibling; n && n !== next; n = n.nextSibling) {
+                if (n.nodeType === 3 && /\s/.test(n.nodeValue || '')) { hasGapNode = true; break; }
+            }
+            if (hasGapNode) continue;
+            if (!/[.!?"'”’)\]]\s*$/.test(a)) continue;          // 不是句子结尾
+            if (!/^[A-Za-z0-9"'“‘(]/.test(b)) continue;         // 后面不是词的开始
+            cur.classList.add('sb-sent-gap');
+        }
+    }
+
+    function scanArticle() {
+        if (!isReadingPage() || !document.body) return;
+        const root = document.querySelector('article') || document.body;
+        const nodes = root.querySelectorAll('p, li, div');
+        const found = [];
+
+        for (let i = 0; i < nodes.length && found.length < 400; i++) {
+            const el = nodes[i];
+            if (el.closest('nav, header, footer, aside, form, .sb-panel, #' + UI_ID)) continue;
+            // 只要叶子块：内部还有块级元素说明是容器，不是段落
+            if (el.querySelector('p, div, li, ul, ol, section, article, h1, h2, h3, h4, table')) continue;
+            const t = (el.textContent || '').trim();
+            if (t.length < 15 || t.length > 3000) continue;
+            if (!looksEnglish(t)) continue;
+            found.push(el);
+        }
+
+        const chars = found.reduce((n, el) => n + el.textContent.trim().length, 0);
+        if (found.length < ARTICLE_MIN_BLOCKS || chars < ARTICLE_MIN_CHARS) {
+            clearArticle();
+            updateUI();
+            return;
+        }
+        if (found.length === articleBlocks.length && found.every((el, i) => el === articleBlocks[i])) return;
+
+        clearArticle();
+        articleBlocks = found;
+        found.forEach((el) => {
+            el.classList.add('sb-block');
+            // 标成英文：断词（hyphens:auto）和读屏发音都靠它，站点默认是 zh-CN
+            if (el.getAttribute('lang') !== 'en') el.setAttribute('lang', 'en');
+            fixSentenceSpacing(el);
+        });
+        document.documentElement.classList.add('sb-read');
+        updateUI();
+    }
+
+    // SPA 路由切换 / 正文异步渲染都要重扫，但别扫太勤
+    let articleTimer = null;
+    function scheduleArticle() {
+        if (!isReadingPage()) return;
+        clearTimeout(articleTimer);
+        articleTimer = setTimeout(scanArticle, 400);
+    }
+
+    // 切句。不能只按句号切：「U.S.」「Mr.」「e.g.」都会把句子劈成两半，
+    // 读出来就是「…a new U.S.」停一下再来「partnership on October 15.」。
+    // 所以先粗切，再把「缩写结尾 / 下一句以小写开头」的碎片并回去。
+    const ABBR_END = /(?:^|[\s(])(?:Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|Mt|vs|etc|Inc|Ltd|Co|Corp|No|Vol|Fig|approx|e\.g|i\.e|a\.m|p\.m)\.$/i;
+
+    function splitSentences(text) {
+        const parts = [];
+        const re = /[^.!?]+[.!?]+["'”’)\]]*/g;
+        let m;
+        let last = 0;
+        while ((m = re.exec(text))) {
+            parts.push({ start: m.index, text: m[0] });
+            last = re.lastIndex;
+        }
+        if (last < text.length) parts.push({ start: last, text: text.slice(last) });
+
+        const out = [];
+        parts.forEach((p) => {
+            const prev = out[out.length - 1];
+            if (prev) {
+                const tail = prev.text.trimEnd();
+                const head = p.text.trimStart();
+                const abbr = ABBR_END.test(tail) || /(?:^|[\s(])[A-Z]\.$/.test(tail); // U.S. / J. K.
+                if (abbr || /^[a-z]/.test(head)) {
+                    prev.text += p.text;
+                    return;
+                }
+            }
+            out.push({ start: p.start, text: p.text });
+        });
+        return out;
+    }
+
+    // 点在哪一句就读哪一句：用 caretRangeFromPoint 拿到字符偏移，再按句切
+    function sentenceAtPoint(block, x, y) {
+        const full = block.textContent || '';
+        let idx = -1;
+        try {
+            const range = document.caretRangeFromPoint ? document.caretRangeFromPoint(x, y) : null;
+            if (range && block.contains(range.startContainer)) {
+                const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
+                let acc = 0;
+                let n;
+                while ((n = walker.nextNode())) {
+                    if (n === range.startContainer) {
+                        acc += range.startOffset;
+                        break;
+                    }
+                    acc += (n.nodeValue || '').length;
+                }
+                idx = acc;
+            }
+        } catch (e) { /* 拿不到偏移就整段读 */ }
+
+        if (idx < 0) return full.trim();
+
+        const parts = splitSentences(full);
+        for (let i = 0; i < parts.length; i++) {
+            const start = parts[i].start;
+            const end = start + parts[i].text.length;
+            if (idx >= start && idx <= end) return parts[i].text.trim();
+        }
+        return full.trim();
+    }
+
+    // 播一段并等它播完（中途 stopAll 会 resolve 掉，避免整篇循环卡死）
+    function playWait(url) {
+        return new Promise((resolve) => {
+            let settled = false;
+            const done = () => {
+                if (settled) return;
+                settled = true;
+                playResolve = null;
+                resolve();
+            };
+            playResolve = done;
+            audioEl.onended = done;
+            audioEl.onerror = done;
+            audioEl.src = url;
+            const p = audioEl.play();
+            if (p && p.catch) p.catch(done);
+        });
+    }
+
+    function speakSystemWait(text) {
+        return new Promise((resolve) => {
+            const synth = window.speechSynthesis;
+            const u = new SpeechSynthesisUtterance(text);
+            const voice = pickSysVoice();
+            u.lang = (voice && voice.lang) || 'en-US';
+            if (voice) u.voice = voice;
+            u.rate = settings.rate;
+            u.volume = 1;
+            let settled = false;
+            const done = () => {
+                if (settled) return;
+                settled = true;
+                playResolve = null;
+                resolve();
+            };
+            playResolve = done;
+            u.onend = done;
+            u.onerror = done;
+            setTimeout(() => synth.speak(u), 60);
+        });
+    }
+
+    async function readArticle() {
+        if (readingAll) {
+            stopAll();
+            return;
+        }
+        scanArticle();
+        const blocks = articleBlocks.slice();
+        if (!blocks.length) {
+            toast('没找到可朗读的段落');
+            return;
+        }
+
+        stopAll();
+        readingAll = true;
+        const myGen = gen;
+        readProgress = { done: 0, total: blocks.length };
+        updateUI();
+
+        const texts = blocks.map((b) => (b.textContent || '').replace(/\s+/g, ' ').trim());
+
+        try {
+            if (settings.engine === 'system') {
+                for (let i = 0; i < texts.length; i++) {
+                    if (myGen !== gen) break;
+                    readProgress = { done: i + 1, total: texts.length };
+                    updateUI();
+                    if (blocks[i]) {
+                        currentEl = blocks[i];
+                        blocks[i].classList.add('sb-speaking');
+                    }
+                    await speakSystemWait(texts[i]);
+                    if (myGen !== gen) break;
+                    if (blocks[i]) blocks[i].classList.remove('sb-speaking');
+                }
+            } else {
+                if (ttsState !== 'ready') {
+                    // 整篇要连续播，先把模型加载完再开始
+                    setBusy(true);
+                    await ensureModel();
+                    setBusy(false);
+                }
+                if (ttsState !== 'ready') {
+                    toast('语音模型未就绪，已切到系统语音');
+                    settings.engine = 'system';
+                    saveSettings();
+                    updateUI();
+                    readingAll = false;
+                    readArticle();
+                    return;
+                }
+                // 一边播一边预生成下一段，避免段间空档
+                let nextUrl = synth(texts[0]).catch(() => null);
+                for (let i = 0; i < texts.length; i++) {
+                    if (myGen !== gen) break;
+                    const url = await nextUrl;
+                    if (myGen !== gen) break;
+                    nextUrl = i + 1 < texts.length ? synth(texts[i + 1]).catch(() => null) : null;
+                    readProgress = { done: i + 1, total: texts.length };
+                    updateUI();
+                    if (!url) continue;
+                    if (blocks[i]) {
+                        currentEl = blocks[i];
+                        blocks[i].classList.add('sb-speaking');
+                    }
+                    await playWait(url);
+                    if (blocks[i]) blocks[i].classList.remove('sb-speaking');
+                }
+            }
+        } finally {
+            if (myGen === gen) {
+                readingAll = false;
+                clearHighlight();
+                readProgress = { done: 0, total: 0 };
+                updateUI();
+            }
         }
     }
 
@@ -639,7 +980,8 @@
             }
         }
         if (settings.engine === 'neural' && ttsState !== 'ready') return;
-        speak(text, el);
+        // 试听固定那句：绕过缓存重新生成，改完生成链路能立刻听出新效果
+        speak(text, el, { fresh: !pending });
     }
 
     // 悬停预生成：让点击几乎零等待
@@ -664,6 +1006,14 @@
             const sel = window.getSelection();
             if (sel && String(sel).trim()) return;
 
+            // 阅读页：点哪句读哪句（整段太长，按句切）
+            const block = e.target.closest('.sb-block');
+            if (block) {
+                const text = sentenceAtPoint(block, e.clientX, e.clientY);
+                if (text && /[a-zA-Z]/.test(text)) speak(text, block);
+                return;
+            }
+
             const el = e.target.closest(SPEAK_SELECTOR);
             if (!el) return;
             const text = (el.textContent || '').trim();
@@ -673,6 +1023,11 @@
 
         document.addEventListener('pointerover', (e) => {
             if (!settings.speak || !(e.target instanceof Element)) return;
+            const block = e.target.closest('.sb-block');
+            if (block) {
+                prefetch(sentenceAtPoint(block, e.clientX, e.clientY));
+                return;
+            }
             const el = e.target.closest(SPEAK_SELECTOR);
             if (!el) return;
             const text = (el.textContent || '').trim();
@@ -682,6 +1037,17 @@
         document.addEventListener('keydown', (e) => {
             if (e.key === 'Escape') stopAll();
         });
+
+        // 阅读页是 SPA：路由切换、正文异步渲染都要重新找段落
+        window.addEventListener('hashchange', () => { clearArticle(); scheduleArticle(); });
+        window.addEventListener('popstate', () => { clearArticle(); scheduleArticle(); });
+        let lastUrl = location.href;
+        setInterval(() => {
+            if (location.href === lastUrl) return;
+            lastUrl = location.href;
+            clearArticle();
+            scheduleArticle();
+        }, 800);
     }
 
     // ========== 右下角面板（Shadow DOM，站点样式进不来） ==========
@@ -757,6 +1123,7 @@
         .actions button:hover { background: #f2f9f7; }
         .actions button.primary { background: #147864; border-color: #147864; color: #fff; }
         .actions button.primary:hover { background: #0f6455; }
+        .actions button[hidden] { display: none !important; }
 
         .hint { margin-top: 8px; color: #999; font-size: 11px; line-height: 1.5; }
 
@@ -842,6 +1209,7 @@
 
                 <div class="actions">
                     <button class="test">试听</button>
+                    <button class="readall" hidden>朗读全文</button>
                     <button class="clear">清空音频缓存</button>
                 </div>
                 <div class="hint"></div>
@@ -866,6 +1234,7 @@
             bar: shadow.querySelector('.bar'),
             barFill: shadow.querySelector('.bar i'),
             test: shadow.querySelector('.test'),
+            readall: shadow.querySelector('.readall'),
             clear: shadow.querySelector('.clear'),
             hint: shadow.querySelector('.hint')
         };
@@ -915,6 +1284,7 @@
         });
 
         ui.test.addEventListener('click', preview);
+        ui.readall.addEventListener('click', readArticle);
 
         ui.clear.addEventListener('click', async () => {
             blobCache.forEach((url) => URL.revokeObjectURL(url));
@@ -1034,6 +1404,19 @@
             ui.hint.textContent = '点「下载并试听」开始下载。';
         }
         syncPrimaryLabel();
+        syncReadAll();
+    }
+
+    // 阅读页才出现「朗读全文」；正在读的时候变成停止，并带上进度
+    function syncReadAll() {
+        if (!ui.readall) return;
+        const show = isReadingPage() && articleBlocks.length > 0;
+        ui.readall.hidden = !show;
+        if (!show) return;
+        ui.readall.textContent = readingAll
+            ? '停止（' + readProgress.done + '/' + readProgress.total + '）'
+            : '朗读全文';
+        ui.readall.classList.toggle('primary', readingAll);
     }
 
     // 首次点朗读但模型没下载：面板里的「试听」就是下载入口，
@@ -1077,6 +1460,7 @@
         html.classList.toggle('sb-speak', settings.speak);
         html.classList.toggle('sb-big', settings.big);
         if (host) host.classList.toggle('dark', html.getAttribute('data-theme') === 'dark');
+        scheduleArticle();
     }
 
     function commit() {
@@ -1135,6 +1519,14 @@
         // 之前用过神经语音的话，页面空闲时把模型预热起来
         setTimeout(warmUp, 1500);
 
+        // 清掉旧配方版本的音频缓存（比如修复前生成的坏音频），否则会一直听到老声音
+        idbPurgeOld().then((n) => {
+            if (n > 0) {
+                refreshCacheCount();
+                console.log('[扇贝助手] 已清理 ' + n + ' 条旧版本音频缓存');
+            }
+        });
+
         // 探测 WebGPU，用来决定下载体积和推理设备
         detectGPU().then((v) => {
             gpuReady = v;
@@ -1153,7 +1545,15 @@
             if (host) host.classList.toggle('dark', document.documentElement.getAttribute('data-theme') === 'dark');
         }).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
 
-        console.log('[扇贝助手] v2.0.0 已加载：' + settings.engine + ' / ' + settings.rate + 'x');
+        // 阅读页正文是异步渲染的，DOM 一变就重扫（节流 1.2s；只加 class 不会触发 childList，不会自激）
+        let articleObsTimer = null;
+        new MutationObserver(() => {
+            if (!isReadingPage()) return;
+            clearTimeout(articleObsTimer);
+            articleObsTimer = setTimeout(scanArticle, 1200);
+        }).observe(document.body, { childList: true, subtree: true });
+
+        console.log('[扇贝助手] v2.1.0 已加载：' + settings.engine + ' / ' + settings.rate + 'x');
     }
 
     if (document.readyState === 'loading') {
