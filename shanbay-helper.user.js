@@ -1,11 +1,58 @@
 // ==UserScript==
-// @name         扇贝单词助手 - Shanbay Words Helper
+// @name         英文朗读助手（扇贝 / 新闻 / 故事）
 // @namespace    http://tampermonkey.net/
-// @version      2.5.0
-// @description  扇贝单词页 + 阅读页：英文句子点击朗读（本地神经语音 Kokoro，WebGPU 加速，引擎与模型全离线），句尾/段尾/顶部三级喇叭，全文可导出 MP3；阅读页按英文报刊重排，中文译文不朗读
+// @version      2.6.0
+// @description  英文网页点句朗读（本地神经语音 Kokoro，WebGPU 加速，引擎与模型全离线），整段/全文一键连读、导出 MP3；支持扇贝阅读、CNN/BBC/NYT/卫报/VOA 等新闻站与 StoryNory/Gutenberg 等故事站
 // @author       You
 // @match        *://web.shanbay.com/*
 // @match        *://*.shanbay.com/wordsweb/*
+// @match        *://*.cnn.com/*
+// @match        *://*.bbc.com/*
+// @match        *://*.bbc.co.uk/*
+// @match        *://*.nytimes.com/*
+// @match        *://*.theguardian.com/*
+// @match        *://*.npr.org/*
+// @match        *://*.reuters.com/*
+// @match        *://*.apnews.com/*
+// @match        *://*.washingtonpost.com/*
+// @match        *://*.latimes.com/*
+// @match        *://*.usatoday.com/*
+// @match        *://*.politico.com/*
+// @match        *://*.nbcnews.com/*
+// @match        *://*.cbsnews.com/*
+// @match        *://*.abcnews.go.com/*
+// @match        *://*.foxnews.com/*
+// @match        *://*.economist.com/*
+// @match        *://*.theatlantic.com/*
+// @match        *://*.newyorker.com/*
+// @match        *://*.time.com/*
+// @match        *://*.bloomberg.com/*
+// @match        *://*.scmp.com/*
+// @match        *://*.aljazeera.com/*
+// @match        *://*.dw.com/*
+// @match        *://*.france24.com/*
+// @match        *://*.telegraph.co.uk/*
+// @match        *://*.thetimes.com/*
+// @match        *://*.independent.co.uk/*
+// @match        *://*.news.sky.com/*
+// @match        *://*.voanews.com/*
+// @match        *://*.breakingnewsenglish.com/*
+// @match        *://*.newsinlevels.com/*
+// @match        *://*.engoo.com/*
+// @match        *://*.simple.wikipedia.org/*
+// @match        *://*.en.wikipedia.org/*
+// @match        *://*.storynory.com/*
+// @match        *://*.americanliterature.com/*
+// @match        *://*.gutenberg.org/*
+// @match        *://*.loyalbooks.com/*
+// @match        *://*.storyberries.com/*
+// @match        *://*.eastoftheweb.com/*
+// @match        *://*.shortkidstories.com/*
+// @match        *://*.thefablecottage.com/*
+// @match        *://*.read.gov/*
+// @match        *://*.storylineonline.net/*
+// @match        *://x.com/*
+// @match        *://twitter.com/*
 // @grant        GM_registerMenuCommand
 // @grant        GM_unregisterMenuCommand
 // @grant        GM_getValue
@@ -38,6 +85,51 @@
     const ENGINE_MJS = 'ort-wasm-simd-threaded.jsep.mjs';
     const ENGINE_FILES = ENGINE_ORDER.concat([ENGINE_WASM, ENGINE_MJS]);
 
+    // ========== 站点 ==========
+    // 不搞「每个站点一套硬编码选择器」——那种东西三个月就烂，还得跟着人家改版跑。
+    // 只区分三件事：是不是扇贝（正文本来就是每句一个元素）、是不是故事站（排版更松）、
+    // 正文容器在哪。容器优先 <article>，没有就走通用打分（谁的 <p> 文本最多谁是正文），
+    // 只有正文确实不在 <article> 里的站点才在 SITE_ROOT 里补一条。
+    const STORY_HOSTS = ['storynory.com', 'americanliterature.com', 'gutenberg.org', 'loyalbooks.com',
+        'storyberries.com', 'eastoftheweb.com', 'shortkidstories.com', 'thefablecottage.com',
+        'read.gov', 'storylineonline.net'];
+
+    const SITE_ROOT = {
+        'voanews.com': '#article-content, .wsw',
+        'gutenberg.org': '.chapter, #chapter-content',
+        'storynory.com': '.entry-content, .post-content',
+        'americanliterature.com': '.story-text, .storycontent',
+        'storyberries.com': '.entry-content',
+        'loyalbooks.com': '.book-content'
+    };
+
+    function hostMatches(list) {
+        const h = location.hostname;
+        return list.some((d) => h === d || h.endsWith('.' + d));
+    }
+
+    function isShanbay() {
+        return hostMatches(['shanbay.com']);
+    }
+
+    function isSocial() {
+        return hostMatches(['x.com', 'twitter.com']);
+    }
+
+    function siteKind() {
+        if (isShanbay()) return 'shanbay';
+        if (isSocial()) return 'social';
+        return hostMatches(STORY_HOSTS) ? 'story' : 'news';
+    }
+
+    function siteRootSelector() {
+        const h = location.hostname;
+        for (const d of Object.keys(SITE_ROOT)) {
+            if (h === d || h.endsWith('.' + d)) return SITE_ROOT[d];
+        }
+        return '';
+    }
+
     // Kokoro v1.0 的音色。af_ 美音女、am_ 美音男、bf_ 英音女、bm_ 英音男。
     const KOKORO_VOICES = [
         { id: 'af_heart', label: '美音 · 女 · Heart（默认）' },
@@ -62,8 +154,16 @@
         sysVoice: '',       // 系统音色名
         rate: 0.9,
         prefetch: true,     // 悬停预生成
-        modelCached: false  // 模型下载过一次，之后点句子直接加载，不再询问
+        modelCached: false, // 模型下载过一次，之后点句子直接加载，不再询问
+        typo: 'auto'        // 正文排版：auto = 故事站默认开、新闻站默认关；on / off 强制
     };
+
+    // 新闻站的排版是编辑设计过的，默认别去动；故事站正文更需要「大字号 + 松行距」。
+    function typoOn() {
+        if (settings.typo === 'on') return true;
+        if (settings.typo === 'off') return false;
+        return siteKind() === 'story';
+    }
 
     const KEY = 'sb-helper.settings.v2';
     const OLD_KEY = 'sb-helper.settings.v1';
@@ -198,6 +298,21 @@
         html.sb-read .sb-sent-gap { margin-right: .32em; }
         /* 正文里的链接保持原色，但别用蓝色下划线打断阅读节奏 */
         html.sb-read .sb-block a { text-decoration-thickness: 1px; text-underline-offset: 2px; }
+
+        /* ========== 通用站点（新闻 / 故事）正文排版 ========== */
+        /* 新闻站的版式是编辑设计过的，默认不动；故事站默认打开。
+           只放宽行距和字号，字体沿用站点自己的，免得「一眼看出被插件改过」。 */
+        html.sb-typo .sb-block {
+            font-size: 19px !important;
+            line-height: 1.85 !important;
+            letter-spacing: .005em !important;
+            margin-bottom: 1em !important;
+        }
+        html.sb-typo .sb-sent-gap { margin-right: .3em; }
+
+        /* 单句 span：平时完全隐形，只在悬停时给一点底色，不改变行内排版 */
+        .sb-sent { border-radius: 3px; transition: background-color .15s ease; }
+        .sb-sent:hover { background-color: rgba(32, 158, 133, .09); }
 
         /* ========== 三级小喇叭：全文 / 全段 / 单句 ========== */
         /* 用真实元素而不是 ::after，因为要单独接点击事件。
@@ -784,6 +899,19 @@
     function stopAll() {
         gen += 1;
         clearHighlight();
+        // 关键：把正在等的那个 promise 放掉。整篇朗读是
+        //   await playWait(url) / await speakSystemWait(text)
+        // 一段一段往下走的，暂停音频并不会让这两个 promise 自己 resolve，
+        // 于是循环永远卡在 await 上、finally 不执行、readingAll 一直 true，
+        // 按钮就永远停在「停止」——再点也只是又 stopAll 一次，怎么都放不出声音。
+        if (playResolve) {
+            const done = playResolve;
+            playResolve = null;
+            try { done(); } catch (e) { /* ignore */ }
+        }
+        // 整篇朗读的状态在这里就收掉，别等循环自己退出（它可能还在 await 上）
+        readingAll = false;
+        readProgress = { done: 0, total: 0 };
         try {
             audioEl.pause();
             audioEl.removeAttribute('src');
@@ -792,6 +920,7 @@
         try {
             window.speechSynthesis.cancel();
         } catch (e) { /* ignore */ }
+        updateUI();
     }
 
     function playUrl(url, el, myGen) {
@@ -968,6 +1097,13 @@
         return location.pathname.indexOf('/reading/') >= 0;
     }
 
+    // 需要挂朗读 UI 的页面。扇贝只在阅读页（单词页另有逻辑），
+    // 其它站点 @match 已经限定了域名，是不是正文交给 scanArticle 按内容判断。
+    function isArticlePage() {
+        if (isShanbay()) return isReadingPage();
+        return true;
+    }
+
     // 判断一块是不是英文正文。中英对照的段落里中文占比很高，
     // 按整段算比例会把正文判掉，所以先把中文剔掉再算。
     function looksEnglish(text) {
@@ -986,6 +1122,7 @@
         document.querySelectorAll('.sb-ic-sent').forEach((ic) => ic.remove());
         articleBlocks = [];
         document.documentElement.classList.remove('sb-read');
+        document.documentElement.classList.remove('sb-typo');
         syncReadBar();
     }
 
@@ -1009,7 +1146,7 @@
     // 页面顶部的工具条：全文朗读 + 导出 MP3。
     // 阅读页才有，正文没扫到之前不出现，免得在别的页面上碍事。
     function syncReadBar() {
-        const show = isReadingPage() && articleBlocks.length > 0;
+        const show = isArticlePage() && articleBlocks.length > 0;
         if (!show) {
             if (readBar) { readBar.remove(); readBar = null; readAllBtn = null; exportBtn = null; }
             return;
@@ -1047,7 +1184,10 @@
     // 给每个段落挂「整段」图标，给每个句子挂「单句」图标。
     // 只插在句子 span 之后，不碰文本节点；React 重渲染冲掉了就再补一次。
     function decorateArticle() {
+        const shanbay = isShanbay();
         articleBlocks.forEach((block) => {
+            // 新闻/故事站的段落是整块纯文本，先把句子切成 span 才挂得上单句喇叭
+            if (!shanbay) wrapSentences(block);
             const kids = block.children;
             for (let i = 0; i < kids.length; i++) {
                 const el = kids[i];
@@ -1099,40 +1239,202 @@
         }
     }
 
-    function scanArticle() {
-        if (!isReadingPage() || !document.body) return;
-        const root = document.querySelector('article') || document.body;
-        const nodes = root.querySelectorAll('p, li, div');
-        const found = [];
+    // 通用正文容器：站点指定选择器 → <article> → 按 <p> 文本量打分。
+    // 打分只遍历一遍 <p>、往上叠 8 层，避免「每个 div 都 querySelectorAll」的 O(n²)。
+    function findArticleRoot() {
+        const sel = siteRootSelector();
+        if (sel) {
+            const el = document.querySelector(sel);
+            if (el) return el;
+        }
+        const art = document.querySelector('article');
+        if (art && (art.textContent || '').trim().length > 300) return art;
 
-        for (let i = 0; i < nodes.length && found.length < 400; i++) {
+        const scores = new Map();
+        document.querySelectorAll('p').forEach((p) => {
+            const t = (p.textContent || '').trim();
+            if (t.length < 40 || !looksEnglish(t)) return;
+            let el = p.parentElement;
+            for (let d = 0; el && d < 8; d++, el = el.parentElement) {
+                scores.set(el, (scores.get(el) || 0) + t.length);
+            }
+        });
+        let best = null;
+        let bestScore = 0;
+        scores.forEach((s, el) => {
+            // 同分取更深的那个：外层容器只是把同一批段落又算了一遍
+            if (s > bestScore || (s === bestScore && best && el.contains(best))) {
+                best = el;
+                bestScore = s;
+            }
+        });
+        return best || document.body;
+    }
+
+    // 通用站点的段落是「一整段纯文本」，没有「每句一个元素」这回事。
+    // 要把句子切成 span 才挂得上单句喇叭。用 Range 按字符区间切：
+    // 句子跨 <a>/<em> 时 extractContents 会把半个元素克隆进 span，结构不会坏。
+    // 从后往前切，前面句子的偏移才不会被打乱。
+    function wrapSentences(block) {
+        if (block.querySelector('.sb-sent')) return;
+        const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT, null);
+        const nodes = [];
+        let full = '';
+        let n;
+        while ((n = walker.nextNode())) {
+            nodes.push({ node: n, start: full.length });
+            full += n.nodeValue;
+        }
+        if (!full.trim()) return;
+        const sents = splitSentences(full);
+        if (sents.length < 2) return;
+
+        const locate = (offset) => {
+            for (let i = nodes.length - 1; i >= 0; i--) {
+                const it = nodes[i];
+                const len = it.node.nodeValue.length;
+                if (offset >= it.start && offset <= it.start + len) return { node: it.node, off: offset - it.start };
+            }
+            return null;
+        };
+
+        for (let i = sents.length - 1; i >= 0; i--) {
+            const s = sents[i];
+            const a = locate(s.start);
+            const b = locate(s.start + s.text.length);
+            if (!a || !b) continue;
+            const range = document.createRange();
+            try {
+                range.setStart(a.node, Math.min(a.off, a.node.nodeValue.length));
+                range.setEnd(b.node, Math.min(b.off, b.node.nodeValue.length));
+                const span = document.createElement('span');
+                span.className = 'sb-sent';
+                span.appendChild(range.extractContents());
+                range.insertNode(span);
+            } catch (e) { /* 切不动就跳过，点击朗读照样能用 */ }
+        }
+    }
+
+    // 从一个容器里挑出「叶子段落」：内部还有块级元素的说明是容器不是段落。
+    function collectBlocks(root, shanbay) {
+        if (!root) return [];
+        const nodes = root.querySelectorAll(shanbay ? 'p, li, div' : 'p, li, blockquote');
+        const out = [];
+        for (let i = 0; i < nodes.length && out.length < 400; i++) {
             const el = nodes[i];
             if (el.closest('nav, header, footer, aside, form, .sb-panel, #' + UI_ID)) continue;
-            // 只要叶子块：内部还有块级元素说明是容器，不是段落
             if (el.querySelector('p, div, li, ul, ol, section, article, h1, h2, h3, h4, table')) continue;
+            // 图注 / 署名 / 时间 / 相关阅读不是正文，别挂喇叭
+            if (!shanbay && el.closest('figcaption, .caption, .image-caption, .credit, .byline, .timestamp, .related, [class*="caption"], [class*="byline"]')) continue;
             const t = (el.textContent || '').trim();
             if (t.length < 15 || t.length > 3000) continue;
             if (!looksEnglish(t)) continue;
-            found.push(el);
+            out.push(el);
         }
+        return out;
+    }
 
-        const chars = found.reduce((n, el) => n + el.textContent.trim().length, 0);
-        if (found.length < ARTICLE_MIN_BLOCKS || chars < ARTICLE_MIN_CHARS) {
+    // 链接密度：正文里几乎没链接，首页/导航/卡片墙基本全是链接。
+    // 实测 BBC 首页那个 <article> 是 0.99，文章页 0.09，故事站 0.005——这条比任何选择器都稳。
+    function linkDensity(root) {
+        if (!root) return 1;
+        const total = (root.textContent || '').length;
+        if (!total) return 1;
+        let linked = 0;
+        root.querySelectorAll('a').forEach((a) => { linked += (a.textContent || '').length; });
+        return linked / total;
+    }
+
+    function textLen(list) {
+        return list.reduce((n, el) => n + el.textContent.trim().length, 0);
+    }
+
+    // 同一父元素下兄弟段落最多的那一组。首页的卡片摘要散落在几十个卡片容器里，
+    // 文章的段落则是「一个爹的一串兄弟」，这条能有效把首页挡在外面。
+    function longestSiblingRun(list) {
+        const byParent = new Map();
+        list.forEach((el) => {
+            const p = el.parentElement;
+            if (!byParent.has(p)) byParent.set(p, []);
+            byParent.get(p).push(el);
+        });
+        let best = [];
+        byParent.forEach((arr) => { if (arr.length > best.length) best = arr; });
+        return best;
+    }
+
+    // X / Twitter：没有「文章」，一条推文就是一段。只认 tweetText，
+    // 每条挂一个小喇叭；不切句子、不套排版、不劫持整页点击。
+    function scanTweets() {
+        const list = [...document.querySelectorAll('[data-testid="tweetText"]')]
+            .filter((el) => (el.textContent || '').trim().length >= 2)
+            .slice(0, 80);
+        if (!list.length) {
             clearArticle();
             updateUI();
             return;
         }
-        const same = found.length === articleBlocks.length && found.every((el, i) => el === articleBlocks[i]);
+        articleBlocks = list;
+        list.forEach((el) => {
+            el.classList.add('sb-block');
+            if (el.getAttribute('lang') !== 'en') el.setAttribute('lang', 'en');
+            if (!el.querySelector(':scope > .sb-ic-para')) {
+                const ic = makeIcon('para', '朗读这条');
+                ic.style.cssText = 'margin-left:6px;vertical-align:-2px;';
+                el.appendChild(ic);
+            }
+        });
+        syncReadBar();
+        updateUI();
+    }
+
+    function scanArticle() {
+        if (!isArticlePage() || !document.body) return;
+        if (isSocial()) {
+            scanTweets();
+            return;
+        }
+        const shanbay = isShanbay();
+        let blocks;
+
+        if (shanbay) {
+            blocks = collectBlocks(document.querySelector('article') || document.body, true);
+        } else {
+            // 先信 <article>：新闻站的文章几乎都包在里面，比任何启发式都准。
+            // 首页的卡片虽然也可能用 <article>，但单张卡片凑不出「3 段 + 400 字」。
+            const art = document.querySelector('article');
+            const inArt = art && linkDensity(art) <= 0.35 ? collectBlocks(art, false) : [];
+            if (inArt.length >= 3 && textLen(inArt) >= 400) {
+                blocks = inArt;
+            } else {
+                const root = findArticleRoot();
+                blocks = root && linkDensity(root) <= 0.35
+                    ? longestSiblingRun(collectBlocks(root, false))
+                    : [];
+            }
+        }
+
+        const minBlocks = shanbay ? ARTICLE_MIN_BLOCKS : 3;
+        const minChars = shanbay ? ARTICLE_MIN_CHARS : 400;
+        const blockChars = textLen(blocks);
+        const longOnes = shanbay ? 99 : blocks.filter((el) => el.textContent.trim().length >= 120).length;
+        if (blocks.length < minBlocks || blockChars < minChars || longOnes < 2) {
+            clearArticle();
+            updateUI();
+            return;
+        }
+        const same = blocks.length === articleBlocks.length && blocks.every((el, i) => el === articleBlocks[i]);
         if (!same) {
             clearArticle();
-            articleBlocks = found;
-            found.forEach((el) => {
+            articleBlocks = blocks;
+            blocks.forEach((el) => {
                 el.classList.add('sb-block');
                 // 标成英文：断词（hyphens:auto）和读屏发音都靠它，站点默认是 zh-CN
                 if (el.getAttribute('lang') !== 'en') el.setAttribute('lang', 'en');
                 fixSentenceSpacing(el);
             });
-            document.documentElement.classList.add('sb-read');
+            if (shanbay) document.documentElement.classList.add('sb-read');
+            if (!shanbay && typoOn()) document.documentElement.classList.add('sb-typo');
         }
         // 段落没变也要补图标：React 重渲染会把插进去的图标冲掉
         decorateArticle();
@@ -1142,7 +1444,7 @@
     // SPA 路由切换 / 正文异步渲染都要重扫，但别扫太勤
     let articleTimer = null;
     function scheduleArticle() {
-        if (!isReadingPage()) return;
+        if (!isArticlePage()) return;
         clearTimeout(articleTimer);
         articleTimer = setTimeout(scanArticle, 400);
     }
@@ -1275,7 +1577,9 @@
             playResolve = done;
             u.onend = done;
             u.onerror = done;
-            setTimeout(() => synth.speak(u), 60);
+            // 延迟 60ms 是为了让 cancel() 先落地；这期间可能已经被 stopAll 掉了，
+            // 那就别再开口，否则「刚点停止又冒出声音」
+            setTimeout(() => { if (!settled) synth.speak(u); }, 60);
         });
     }
 
@@ -1557,6 +1861,9 @@
 
             if (e.target.closest('a, button, input, textarea, select, [contenteditable="true"]')) return;
 
+            // X / Twitter 上点击是导航和展开，只认喇叭，别的一概不接
+            if (isSocial()) return;
+
             // 划词选择时不朗读
             const sel = window.getSelection();
             if (sel && String(sel).trim()) return;
@@ -1578,6 +1885,7 @@
 
         document.addEventListener('pointerover', (e) => {
             if (!settings.speak || !(e.target instanceof Element)) return;
+            if (isSocial()) return;   // 时间线上滑一下就合成一条，纯属浪费
             const block = e.target.closest('.sb-block');
             if (block) {
                 prefetch(sentenceAtPoint(block, e.clientX, e.clientY));
@@ -1757,6 +2065,7 @@
                 <div class="row checks">
                     <label><input type="checkbox" class="big"> 放大例句与引文</label>
                     <label><input type="checkbox" class="prefetch"> 悬停预生成（点击更快）</label>
+                    <label class="typoRow"><input type="checkbox" class="typo"> 正文排版（大字 / 松行距）</label>
                 </div>
 
                 <div class="status">未加载</div>
@@ -1786,6 +2095,8 @@
             rateVal: shadow.querySelector('.rateVal'),
             big: shadow.querySelector('.big'),
             prefetch: shadow.querySelector('.prefetch'),
+            typo: shadow.querySelector('.typo'),
+            typoRow: shadow.querySelector('.typoRow'),
             status: shadow.querySelector('.status'),
             bar: shadow.querySelector('.bar'),
             barFill: shadow.querySelector('.bar i'),
@@ -1838,6 +2149,11 @@
         ui.prefetch.addEventListener('change', () => {
             settings.prefetch = ui.prefetch.checked;
             saveSettings();
+        });
+        ui.typo.addEventListener('change', () => {
+            settings.typo = ui.typo.checked ? 'on' : 'off';
+            saveSettings();
+            document.documentElement.classList.toggle('sb-typo', ui.typo.checked);
         });
 
         ui.test.addEventListener('click', preview);
@@ -1935,6 +2251,9 @@
 
         ui.big.checked = settings.big;
         ui.prefetch.checked = settings.prefetch;
+        ui.typo.checked = typoOn();
+        // 扇贝阅读的排版是强制套用的，这一项只对别的站点有意义
+        ui.typoRow.style.display = isShanbay() ? 'none' : '';
 
         // 状态
         ui.status.classList.toggle('err', ttsState === 'error');
@@ -1970,7 +2289,7 @@
     // 阅读页才出现「朗读全文」；正在读的时候变成停止，并带上进度
     function syncReadAll() {
         if (!ui.readall) return;
-        const show = isReadingPage() && articleBlocks.length > 0;
+        const show = isArticlePage() && articleBlocks.length > 0;
         ui.readall.hidden = !show;
         if (show) {
             ui.readall.textContent = readingAll
@@ -2086,7 +2405,7 @@
         idbPurgeOld().then((n) => {
             if (n > 0) {
                 refreshCacheCount();
-                console.log('[扇贝助手] 已清理 ' + n + ' 条旧版本音频缓存');
+                console.log('[英文朗读助手] 已清理 ' + n + ' 条旧版本音频缓存');
             }
         });
 
@@ -2111,12 +2430,15 @@
         // 阅读页正文是异步渲染的，DOM 一变就重扫（节流 1.2s；只加 class 不会触发 childList，不会自激）
         let articleObsTimer = null;
         new MutationObserver(() => {
-            if (!isReadingPage()) return;
+            if (!isArticlePage()) return;
+            // 扇贝是 SPA，重渲染会把图标冲掉，所以要一直盯着；
+            // 新闻站 DOM 天天在动（广告、推荐位），挂好之后没被拆掉就别再扫了，省得白烧 CPU。
+            if (!isShanbay() && articleBlocks.length && articleBlocks.every((el) => el.isConnected)) return;
             clearTimeout(articleObsTimer);
             articleObsTimer = setTimeout(scanArticle, 1200);
         }).observe(document.body, { childList: true, subtree: true });
 
-        console.log('[扇贝助手] v2.4.0 已加载：' + settings.engine + ' / ' + settings.rate + 'x');
+        console.log('[英文朗读助手] v2.6.0 已加载：' + settings.engine + ' / ' + settings.rate + 'x');
     }
 
     if (document.readyState === 'loading') {
