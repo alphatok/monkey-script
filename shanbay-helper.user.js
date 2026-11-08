@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         扇贝单词助手 - Shanbay Words Helper
 // @namespace    http://tampermonkey.net/
-// @version      2.3.0
+// @version      2.4.0
 // @description  扇贝单词页 + 阅读页：英文句子点击朗读（本地神经语音 Kokoro，WebGPU 加速、离线可用），句尾/段尾/顶部三级喇叭，全文可导出 MP3；阅读页按英文报刊重排，中文译文不朗读
 // @author       You
 // @match        *://web.shanbay.com/*
@@ -561,6 +561,78 @@
         if (settings.engine !== 'neural' || ttsState !== 'idle' || !settings.modelCached) return;
         if (!(await modelInCache())) return; // 缓存没了就别偷偷重下整个模型
         ensureModel().catch(() => {});
+    }
+
+    // ========== 离线导入模型 ==========
+    // 给「完全没网」的场景用：选一次模型文件夹，把文件按 transformers.js 的
+    // 缓存键（就是 HuggingFace 的原始 URL）写进 Cache Storage，之后它直接命中缓存，
+    // 一个字节的网络请求都不会发。不需要本地服务器，也不需要什么额外权限。
+    const MODEL_BASE = 'https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/';
+    const MODEL_FILES = ['config.json', 'tokenizer.json', 'tokenizer_config.json'];
+    const MODEL_DIRS = ['onnx/', 'voices/'];
+
+    // 用户可能选中 model/、也可能选中它的上一层，所以从路径里截出真正的模型内路径
+    function modelRelPath(path) {
+        const parts = String(path || '').split('/');
+        for (let i = 0; i < parts.length; i++) {
+            const rest = parts.slice(i).join('/');
+            if (MODEL_FILES.indexOf(rest) >= 0) return rest;
+            if (MODEL_DIRS.some((d) => rest.indexOf(d) === 0)) return rest;
+        }
+        return null;
+    }
+
+    async function importModelFiles(fileList) {
+        const main = await caches.open('transformers-cache');
+        const voice = await caches.open('kokoro-voices');
+        let n = 0;
+        let bytes = 0;
+        const names = [];
+        for (const f of fileList) {
+            const rel = modelRelPath(f.webkitRelativePath || f.name);
+            if (!rel) continue;
+            const cache = rel.indexOf('voices/') === 0 ? voice : main;
+            await cache.put(MODEL_BASE + rel, new Response(f));
+            n++;
+            bytes += f.size;
+            names.push(rel);
+            if (ui.status) ui.status.textContent = '正在导入 ' + n + ' 个文件 · ' + (bytes / 1048576).toFixed(0) + 'MB';
+        }
+        return { n, bytes, names };
+    }
+
+    async function pickModelFolder() {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.webkitdirectory = true;
+        input.multiple = true;
+        input.style.display = 'none';
+        input.addEventListener('change', async () => {
+            const files = [...(input.files || [])];
+            input.remove();
+            if (!files.length) return;
+            setBusy(true);
+            try {
+                const r = await importModelFiles(files);
+                if (!r.n) {
+                    toast('这个文件夹里没找到模型文件');
+                } else if (r.names.indexOf('onnx/model.onnx') < 0 && r.names.indexOf('onnx/model_quantized.onnx') < 0) {
+                    toast('导入了 ' + r.n + ' 个文件，但缺少 onnx 模型本体');
+                } else {
+                    settings.modelCached = true;
+                    saveSettings();
+                    refreshCacheCount();
+                    toast('已导入 ' + r.n + ' 个文件 · ' + (r.bytes / 1048576).toFixed(0) + 'MB，现在断网也能用');
+                }
+            } catch (e) {
+                toast('导入失败：' + String((e && e.message) || e).slice(0, 60));
+            } finally {
+                setBusy(false);
+                updateUI();
+            }
+        });
+        (document.body || document.documentElement).appendChild(input);
+        input.click();
     }
 
     // ========== 播放 ==========
@@ -1465,7 +1537,7 @@
         .bar.show { display: block; }
         .bar i { display: block; height: 100%; width: 0; background: #147864; transition: width .2s ease; }
 
-        .actions { display: flex; gap: 8px; margin-top: 10px; }
+        .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
         .actions button {
             flex: 1; padding: 8px 0; font-size: 12px; border-radius: 8px; cursor: pointer;
             border: 1px solid #e2eae7; background: #fff; color: #147864;
@@ -1560,6 +1632,7 @@
                 <div class="actions">
                     <button class="test">试听</button>
                     <button class="readall" hidden>朗读全文</button>
+                    <button class="import">导入离线模型</button>
                     <button class="clear">清空音频缓存</button>
                 </div>
                 <div class="hint"></div>
@@ -1585,6 +1658,7 @@
             barFill: shadow.querySelector('.bar i'),
             test: shadow.querySelector('.test'),
             readall: shadow.querySelector('.readall'),
+            import: shadow.querySelector('.import'),
             clear: shadow.querySelector('.clear'),
             hint: shadow.querySelector('.hint')
         };
@@ -1635,6 +1709,7 @@
 
         ui.test.addEventListener('click', preview);
         ui.readall.addEventListener('click', readArticle);
+        ui.import.addEventListener('click', pickModelFolder);
 
         ui.clear.addEventListener('click', async () => {
             blobCache.forEach((url) => URL.revokeObjectURL(url));
@@ -1843,6 +1918,7 @@
             commit();
         });
         add('⚙ 打开设置面板', openPanel);
+        add('📦 导入离线模型（选 model 文件夹）', pickModelFolder);
         add((settings.big ? '✓ ' : '　') + '放大例句与引文', () => {
             settings.big = !settings.big;
             commit();
@@ -1905,7 +1981,7 @@
             articleObsTimer = setTimeout(scanArticle, 1200);
         }).observe(document.body, { childList: true, subtree: true });
 
-        console.log('[扇贝助手] v2.3.0 已加载：' + settings.engine + ' / ' + settings.rate + 'x');
+        console.log('[扇贝助手] v2.4.0 已加载：' + settings.engine + ' / ' + settings.rate + 'x');
     }
 
     if (document.readyState === 'loading') {
