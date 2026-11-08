@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         英文朗读助手（扇贝 / 新闻 / 故事）
 // @namespace    http://tampermonkey.net/
-// @version      2.6.0
+// @version      2.6.1
 // @description  英文网页点句朗读（本地神经语音 Kokoro，WebGPU 加速，引擎与模型全离线），整段/全文一键连读、导出 MP3；支持扇贝阅读、CNN/BBC/NYT/卫报/VOA 等新闻站与 StoryNory/Gutenberg 等故事站
 // @author       You
 // @match        *://web.shanbay.com/*
@@ -93,6 +93,69 @@
     const STORY_HOSTS = ['storynory.com', 'americanliterature.com', 'gutenberg.org', 'loyalbooks.com',
         'storyberries.com', 'eastoftheweb.com', 'shortkidstories.com', 'thefablecottage.com',
         'read.gov', 'storylineonline.net'];
+
+    // 面板里「支持的站点」打开的那个页面用的目录。改 @match 的时候记得同步这里，
+    // 两边对不上用户就会看到「列表里有但没生效」。
+    const SITE_CATALOG = [
+        ['扇贝', [
+            ['扇贝阅读', 'https://web.shanbay.com/reading', '正文逐句朗读，按英文报刊重排'],
+            ['扇贝单词', 'https://web.shanbay.com/wordsweb', '单词页例句、短语']
+        ]],
+        ['新闻媒体', [
+            ['BBC', 'https://www.bbc.com/news', ''],
+            ['CNN', 'https://www.cnn.com', ''],
+            ['纽约时报', 'https://www.nytimes.com', '付费墙内已登录的部分'],
+            ['卫报', 'https://www.theguardian.com', ''],
+            ['NPR', 'https://www.npr.org', ''],
+            ['路透社', 'https://www.reuters.com', ''],
+            ['美联社', 'https://apnews.com', ''],
+            ['华盛顿邮报', 'https://www.washingtonpost.com', ''],
+            ['洛杉矶时报', 'https://www.latimes.com', ''],
+            ['今日美国', 'https://www.usatoday.com', ''],
+            ['Politico', 'https://www.politico.com', ''],
+            ['NBC News', 'https://www.nbcnews.com', ''],
+            ['CBS News', 'https://www.cbsnews.com', ''],
+            ['ABC News', 'https://abcnews.go.com', ''],
+            ['Fox News', 'https://www.foxnews.com', ''],
+            ['经济学人', 'https://www.economist.com', ''],
+            ['大西洋月刊', 'https://www.theatlantic.com', ''],
+            ['纽约客', 'https://www.newyorker.com', ''],
+            ['时代周刊', 'https://time.com', ''],
+            ['彭博', 'https://www.bloomberg.com', ''],
+            ['南华早报', 'https://www.scmp.com', ''],
+            ['半岛电视台', 'https://www.aljazeera.com', ''],
+            ['德国之声 DW', 'https://www.dw.com', ''],
+            ['France 24', 'https://www.france24.com', ''],
+            ['每日电讯报', 'https://www.telegraph.co.uk', ''],
+            ['泰晤士报', 'https://www.thetimes.com', ''],
+            ['独立报', 'https://www.independent.co.uk', ''],
+            ['Sky News', 'https://news.sky.com', '']
+        ]],
+        ['英语学习', [
+            ['VOA 慢速英语', 'https://learningenglish.voanews.com', '语速慢、词汇简单，最适合练听力'],
+            ['Breaking News English', 'https://breakingnewsenglish.com', '分级新闻 + 练习题'],
+            ['News in Levels', 'https://www.newsinlevels.com', '同一新闻三个难度'],
+            ['Engoo Daily News', 'https://engoo.com/app/daily-news', '每日短文 + 生词表'],
+            ['维基百科', 'https://en.wikipedia.org', ''],
+            ['Simple Wikipedia', 'https://simple.wikipedia.org', '用简单英语写的百科']
+        ]],
+        ['故事站 · 睡前听', [
+            ['StoryNory', 'https://www.storynory.com', '童话与原创故事，每篇配朗读音频'],
+            ['Project Gutenberg', 'https://www.gutenberg.org', '公版书全文：爱丽丝、傲慢与偏见……'],
+            ['American Literature', 'https://americanliterature.com', '美国文学短篇 + 儿童故事'],
+            ['LoyalBooks', 'https://www.loyalbooks.com', '公版有声书文本'],
+            ['Storyberries', 'https://www.storyberries.com', '儿童睡前故事，按年龄分'],
+            ['East of the Web', 'https://www.eastoftheweb.com', '短篇小说库'],
+            ['Short Kid Stories', 'https://www.shortkidstories.com', '短篇儿童故事'],
+            ['The Fable Cottage', 'https://www.thefablecottage.com', '寓言，有双语版'],
+            ['Read.gov', 'https://www.read.gov', '美国国会图书馆儿童读物'],
+            ['Storyline Online', 'https://www.storylineonline.net', '视频站，正文较少']
+        ]],
+        ['社交', [
+            ['X', 'https://x.com/home', '时间线上每条推文一个小喇叭'],
+            ['Twitter', 'https://twitter.com/home', '同上']
+        ]]
+    ];
 
     const SITE_ROOT = {
         'voanews.com': '#article-content, .wsw',
@@ -670,6 +733,7 @@
             ttsState = 'ready';
             loadPct = 100;
             settings.modelCached = true;
+            siteCached = true;
             saveSettings();
             updateUI();
             refreshCacheCount();
@@ -757,6 +821,17 @@
     }
 
     // 模型是否已缓存在浏览器里（transformers.js 存在 Cache Storage）
+    // 注意：Cache Storage 和 IndexedDB 都是「按站点分家」的，模型下在 bbc.com
+    // 不等于 shanbay.com 也有。GM 存储里的 settings.modelCached 是全局的，
+    // 只能当「这人用过神经语音」的提示，绝不能当成「本站已缓存」。
+    let siteCached = false;   // 当前站点到底有没有模型，启动时查一次
+
+    async function refreshSiteCached() {
+        siteCached = await modelInCache();
+        updateUI();
+        return siteCached;
+    }
+
     async function modelInCache() {
         try {
             const names = await caches.keys();
@@ -868,6 +943,7 @@
                     settings.modelCached = true;
                     saveSettings();
                     refreshCacheCount();
+                    refreshSiteCached();
                     toast('已导入 ' + r.n + ' 个文件 · ' + (r.bytes / 1048576).toFixed(0) + 'MB'
                         + (r.engine >= ENGINE_FILES.length ? '（含离线引擎）' : '')
                         + '，现在断网也能用');
@@ -1024,8 +1100,11 @@
 
         // 神经语音：模型还没就绪
         if (ttsState !== 'ready') {
-            if (settings.modelCached) {
-                // 之前下过，浏览器里有缓存，直接从缓存加载，不再打断用户
+            // 现场查本站缓存：GM 里的 modelCached 是全站共享的，靠它判断会换个站点就重下 310MB
+            const here = await modelInCache();
+            if (here) {
+                siteCached = true;
+                // 本站确实有缓存，直接加载，不再打断用户
                 setBusy(true);
                 ensureModel().then(() => {
                     setBusy(false);
@@ -1038,9 +1117,12 @@
                 });
                 return;
             }
-            // 从没下过：别悄悄拉几百 MB，弹面板等用户点「下载并试听」
+            // 本站没缓存：别悄悄拉几百 MB，弹面板让用户自己决定
             pendingAfterLoad = { text, el };
             openPanel();
+            toast(settings.modelCached
+                ? '这个站点还没导入模型，点「导入离线模型」选一次包目录'
+                : '神经语音还没准备好，点「试听」下载或导入离线包');
             updateUI();
             return;
         }
@@ -1619,7 +1701,17 @@
                 }
             } else {
                 if (ttsState !== 'ready') {
-                    // 整篇要连续播，先把模型加载完再开始
+                    // 整篇要连续播，先把模型加载完再开始。
+                    // 但本站没缓存就别闷头下 310MB——先问一句，让用户选导入还是在线下载。
+                    if (!(await modelInCache())) {
+                        openPanel();
+                        toast('本站还没导入语音模型：点「导入离线模型」选一次包目录，或用系统语音');
+                        readingAll = false;
+                        readProgress = { done: 0, total: 0 };
+                        updateUI();
+                        return;
+                    }
+                    siteCached = true;
                     setBusy(true);
                     await ensureModel();
                     setBusy(false);
@@ -1918,6 +2010,15 @@
         :host { all: initial; }
         * { box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; }
 
+        .sites { margin-top: 8px; text-align: right; }
+        .sites-link {
+            font: 12px/1 -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+            color: #147864; cursor: pointer; text-decoration: none;
+            border-bottom: 1px dashed rgba(20, 120, 100, .35);
+        }
+        .sites-link:hover { border-bottom-style: solid; }
+        :host(.dark) .sites-link { color: #6fd3b8; border-bottom-color: rgba(111, 211, 184, .35); }
+
         .gear {
             position: fixed; right: 20px; bottom: 20px; z-index: 2147483001;
             width: 42px; height: 42px; border-radius: 50%;
@@ -2078,6 +2179,7 @@
                     <button class="clear">清空音频缓存</button>
                 </div>
                 <div class="hint"></div>
+                <div class="sites"><a class="sites-link">支持的站点 ›</a></div>
             </div>
         `;
 
@@ -2104,7 +2206,8 @@
             readall: shadow.querySelector('.readall'),
             import: shadow.querySelector('.import'),
             clear: shadow.querySelector('.clear'),
-            hint: shadow.querySelector('.hint')
+            hint: shadow.querySelector('.hint'),
+            sites: shadow.querySelector('.sites-link')
         };
 
         ui.gear.addEventListener('click', () => {
@@ -2112,6 +2215,7 @@
             if (ui.panel.classList.contains('open')) refreshCacheCount();
         });
         ui.close.addEventListener('click', () => ui.panel.classList.remove('open'));
+        ui.sites.addEventListener('click', (e) => { e.preventDefault(); openSiteList(); });
 
         ui.seg.forEach((btn) => {
             btn.addEventListener('click', () => {
@@ -2275,12 +2379,15 @@
         } else if (ttsState === 'error') {
             ui.status.textContent = '模型加载失败：' + ttsError;
             ui.hint.textContent = '可以点「试听」重试，或切到系统语音。';
+        } else if (siteCached) {
+            ui.status.textContent = '本站模型已就绪 · 点句子会自动加载（约 1 秒）';
+            ui.hint.textContent = '模型存在浏览器里，按站点分开存，换站点要再导入一次（0.5 秒）。';
         } else if (settings.modelCached) {
-            ui.status.textContent = '模型已下载 · 点句子会自动加载（约 1 秒）';
-            ui.hint.textContent = '浏览器清过缓存的话会重新下载一次。';
+            ui.status.textContent = '本站还没导入模型（模型按站点分开存）';
+            ui.hint.textContent = '点「导入离线模型」选一次包目录，0.5 秒搞定，不用重新下载。';
         } else {
             ui.status.textContent = '神经语音未下载 · 首次约 ' + sizeLabel() + '，之后离线可用';
-            ui.hint.textContent = '点「下载并试听」开始下载。';
+            ui.hint.textContent = '点「试听」在线下载，或用离线包导入。';
         }
         syncPrimaryLabel();
         syncReadAll();
@@ -2353,6 +2460,58 @@
     // ========== 菜单（保留快捷入口，主要操作在面板里） ==========
     let menuIds = [];
 
+    // 面板里的「支持的站点」：本地拼一页 HTML 用新标签打开。
+    // 走 blob URL，断网也能看，也不用额外维护一个线上页面。
+    function openSiteList() {
+        const esc = (t) => String(t).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+        const groups = SITE_CATALOG.map(([name, items]) => {
+            const rows = items.map(([label, url, note]) => {
+                const host = url.replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+                return '<li><a href="' + esc(url) + '" target="_blank" rel="noreferrer">' + esc(label) + '</a>'
+                    + '<span class="host">' + esc(host) + '</span>'
+                    + (note ? '<span class="note">' + esc(note) + '</span>' : '')
+                    + '</li>';
+            }).join('');
+            return '<section><h2>' + esc(name) + '<em>' + items.length + '</em></h2><ul>' + rows + '</ul></section>';
+        }).join('');
+        const total = SITE_CATALOG.reduce((n, g) => n + g[1].length, 0);
+
+        const html = '<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">'
+            + '<title>英文朗读助手 · 支持站点</title><style>'
+            + '*{box-sizing:border-box}'
+            + 'body{margin:0;padding:40px 20px 80px;background:#f6f7f7;color:#1b1b1b;'
+            + 'font:15px/1.7 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif}'
+            + '.wrap{max-width:860px;margin:0 auto}'
+            + 'h1{font-size:26px;margin:0 0 6px}'
+            + '.sub{color:#777;margin:0 0 26px;font-size:14px}'
+            + 'section{background:#fff;border-radius:12px;padding:18px 22px 8px;margin-bottom:16px;'
+            + 'box-shadow:0 2px 14px rgba(0,0,0,.05)}'
+            + 'h2{font-size:17px;margin:0 0 10px;padding-left:10px;border-left:4px solid #147864}'
+            + 'h2 em{font-style:normal;font-size:12px;color:#8aa;margin-left:8px}'
+            + 'ul{list-style:none;margin:0;padding:0}'
+            + 'li{padding:7px 0;border-bottom:1px solid #f0f2f1;display:flex;flex-wrap:wrap;'
+            + 'align-items:baseline;gap:10px}'
+            + 'li:last-child{border-bottom:0}'
+            + 'a{color:#147864;text-decoration:none;font-weight:600;min-width:180px}'
+            + 'a:hover{text-decoration:underline}'
+            + '.host{color:#9aa5a1;font:12px/1 "SF Mono",Menlo,monospace}'
+            + '.note{color:#777;font-size:13px;flex:1 1 240px}'
+            + 'footer{margin-top:24px;color:#777;font-size:13px;line-height:1.9}'
+            + '</style></head><body><div class="wrap">'
+            + '<h1>支持的站点</h1>'
+            + '<p class="sub">共 ' + total + ' 个。打开<b>文章页 / 故事页</b>才会在正文挂小喇叭；'
+            + '首页和栏目页是故意跳过的（按链接密度和段落密度自动判断）。</p>'
+            + groups
+            + '<footer>模型和引擎存在浏览器里，<b>按站点分开存</b>：每个站点第一次用，'
+            + '点一次齿轮 →「导入离线模型」选一下离线包目录即可，0.5 秒，不用重新下载。<br>'
+            + '想加新站点：Tampermonkey 面板里编辑脚本，在 @match 段落照着加一行，刷新即可。</footer>'
+            + '</div></body></html>';
+
+        const url = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
+        window.open(url, '_blank', 'noopener');
+        setTimeout(() => URL.revokeObjectURL(url), 120000);
+    }
+
     function registerMenus() {
         if (typeof GM_registerMenuCommand !== 'function') return;
         menuIds.forEach((id) => {
@@ -2372,7 +2531,8 @@
             commit();
         });
         add('⚙ 打开设置面板', openPanel);
-        add('📦 导入离线模型（选 model 文件夹）', pickModelFolder);
+        add('🌐 支持的站点', openSiteList);
+        add('📦 导入离线模型（选包目录）', pickModelFolder);
         add((settings.big ? '✓ ' : '　') + '放大例句与引文', () => {
             settings.big = !settings.big;
             commit();
@@ -2398,8 +2558,8 @@
             if (ttsState === 'loading' && ui.panel && ui.panel.classList.contains('open')) updateUI();
         }, 400);
 
-        // 之前用过神经语音的话，页面空闲时把模型预热起来
-        setTimeout(warmUp, 1500);
+        // 先查本站到底有没有模型（Cache Storage 按站点分家），再决定要不要预热
+        refreshSiteCached().then(() => setTimeout(warmUp, 1500));
 
         // 清掉旧配方版本的音频缓存（比如修复前生成的坏音频），否则会一直听到老声音
         idbPurgeOld().then((n) => {
@@ -2438,7 +2598,7 @@
             articleObsTimer = setTimeout(scanArticle, 1200);
         }).observe(document.body, { childList: true, subtree: true });
 
-        console.log('[英文朗读助手] v2.6.0 已加载：' + settings.engine + ' / ' + settings.rate + 'x');
+        console.log('[英文朗读助手] v2.6.1 已加载：' + settings.engine + ' / ' + settings.rate + 'x');
     }
 
     if (document.readyState === 'loading') {
