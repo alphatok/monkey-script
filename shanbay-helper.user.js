@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         扇贝单词助手 - Shanbay Words Helper
 // @namespace    http://tampermonkey.net/
-// @version      2.4.0
-// @description  扇贝单词页 + 阅读页：英文句子点击朗读（本地神经语音 Kokoro，WebGPU 加速、离线可用），句尾/段尾/顶部三级喇叭，全文可导出 MP3；阅读页按英文报刊重排，中文译文不朗读
+// @version      2.5.0
+// @description  扇贝单词页 + 阅读页：英文句子点击朗读（本地神经语音 Kokoro，WebGPU 加速，引擎与模型全离线），句尾/段尾/顶部三级喇叭，全文可导出 MP3；阅读页按英文报刊重排，中文译文不朗读
 // @author       You
 // @match        *://web.shanbay.com/*
 // @match        *://*.shanbay.com/wordsweb/*
@@ -22,6 +22,21 @@
     // ========== 常量 ==========
     const KOKORO_CDN = 'https://cdn.jsdelivr.net/npm/kokoro-js@1.2.1/+esm';
     const KOKORO_MODEL = 'onnx-community/Kokoro-82M-v1.0-ONNX';
+
+    // 语音引擎的完整依赖图（就是 jsDelivr 上那 5 个 +esm）。离线包里会把这几个
+    // 文件原样带上，运行时用 blob URL 顶替，浏览器一次外网请求都不发。
+    // 顺序就是拓扑序：被依赖的排在前面，生成 blob 时才能直接替换成前者的 URL。
+    const ENGINE_CDN = {
+        'ort-common.js': 'https://cdn.jsdelivr.net/npm/onnxruntime-common/+esm',
+        'ort-web.js': 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0-dev.20250409-89f8206ba4/+esm',
+        'phonemizer.js': 'https://cdn.jsdelivr.net/npm/phonemizer@1.2.1/+esm',
+        'transformers.js': 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.5.1/+esm',
+        'kokoro.js': 'https://cdn.jsdelivr.net/npm/kokoro-js@1.2.1/+esm'
+    };
+    const ENGINE_ORDER = ['ort-common.js', 'ort-web.js', 'phonemizer.js', 'transformers.js', 'kokoro.js'];
+    const ENGINE_WASM = 'ort-wasm-simd-threaded.jsep.wasm';   // 21.6MB，真正的大头
+    const ENGINE_MJS = 'ort-wasm-simd-threaded.jsep.mjs';
+    const ENGINE_FILES = ENGINE_ORDER.concat([ENGINE_WASM, ENGINE_MJS]);
 
     // Kokoro v1.0 的音色。af_ 美音女、am_ 美音男、bf_ 英音女、bm_ 英音男。
     const KOKORO_VOICES = [
@@ -55,7 +70,9 @@
     const STYLE_ID = 'sb-helper-style';
     const UI_ID = 'sb-helper-ui';
     const DB_NAME = 'sb-helper';
+    const DB_VERSION = 2;          // v2 加了 engine 仓库，老库走 onupgradeneeded 自动补
     const DB_STORE = 'audio';
+    const DB_ENGINE = 'engine';    // 离线引擎文件（wasm 21.6MB 放这儿，和音频缓存分开）
 
     // 音频缓存的「配方版本」。生成链路一变（换模型精度、换编码、换后处理）就 +1，
     // 老缓存全部作废。之前踩过的坑：fp16 那版模型生成的是宽带噪声（听感像刺刺的电流声），
@@ -281,13 +298,14 @@
         dbPromise = new Promise((resolve) => {
             let req;
             try {
-                req = indexedDB.open(DB_NAME, 1);
+                req = indexedDB.open(DB_NAME, DB_VERSION);
             } catch (e) {
                 resolve(null);
                 return;
             }
             req.onupgradeneeded = () => {
                 if (!req.result.objectStoreNames.contains(DB_STORE)) req.result.createObjectStore(DB_STORE);
+                if (!req.result.objectStoreNames.contains(DB_ENGINE)) req.result.createObjectStore(DB_ENGINE);
             };
             req.onsuccess = () => resolve(req.result);
             req.onerror = () => resolve(null);
@@ -315,6 +333,50 @@
         try {
             db.transaction(DB_STORE, 'readwrite').objectStore(DB_STORE).put(blob, key);
         } catch (e) { /* 配额满了就只留内存 */ }
+    }
+
+    // 引擎文件单独一个仓库：清空音频缓存不该把 21MB 的 wasm 一起清掉
+    async function idbGetEngine(key) {
+        const db = await openDB();
+        if (!db) return null;
+        return new Promise((resolve) => {
+            try {
+                const req = db.transaction(DB_ENGINE, 'readonly').objectStore(DB_ENGINE).get(key);
+                req.onsuccess = () => resolve(req.result || null);
+                req.onerror = () => resolve(null);
+            } catch (e) {
+                resolve(null);
+            }
+        });
+    }
+
+    async function idbPutEngine(key, blob) {
+        const db = await openDB();
+        if (!db) return false;
+        return new Promise((resolve) => {
+            try {
+                const tx = db.transaction(DB_ENGINE, 'readwrite');
+                tx.objectStore(DB_ENGINE).put(blob, key);
+                tx.oncomplete = () => resolve(true);
+                tx.onerror = () => resolve(false);
+            } catch (e) {
+                resolve(false);
+            }
+        });
+    }
+
+    async function idbEngineCount() {
+        const db = await openDB();
+        if (!db) return 0;
+        return new Promise((resolve) => {
+            try {
+                const req = db.transaction(DB_ENGINE, 'readonly').objectStore(DB_ENGINE).count();
+                req.onsuccess = () => resolve(req.result || 0);
+                req.onerror = () => resolve(0);
+            } catch (e) {
+                resolve(0);
+            }
+        });
     }
 
     async function idbCount() {
@@ -387,6 +449,59 @@
         return TTS_REV + '|' + settings.voice + '|' + settings.rate.toFixed(2) + '|' + text;
     }
 
+    // ========== 离线引擎加载 ==========
+    // 难点：这 5 个 +esm 之间是 ES module 的 import 关系，import 只走浏览器 HTTP 缓存，
+    // 不查 Cache Storage，所以像模型那样塞缓存没用，必须让 import 本身消失。
+    // 办法：把文件读出来，把 /npm/xxx/+esm 这类说明符先改写成绝对 CDN URL，
+    // 再按拓扑序替换成已生成好的 blob URL——每个模块都从 blob 里 import 它的依赖，
+    // 一个外网地址都不剩。wasm 与它的 .mjs 胶水同理，走 ort 的 wasmPaths 注入。
+    let enginePromise = null;
+    let engineLocal = false;      // 是否用的本地引擎（离线包导入过）
+
+    async function loadEngine() {
+        if (enginePromise) return enginePromise;
+        enginePromise = (async () => {
+            const raw = {};
+            for (const name of ENGINE_FILES) {
+                const blob = await idbGetEngine(name);
+                if (!blob) return null;          // 没导入过引擎，交给调用方回退 CDN
+                raw[name] = blob;
+            }
+            const urls = {};
+            for (const name of ENGINE_ORDER) {
+                let text = await raw[name].text();
+                // /npm/ 是 jsDelivr 的根相对写法，放进 blob 会解析到站点自己的域名下，
+                // 先变成绝对地址，后面才好精确替换
+                text = text.replace(/\/npm\//g, 'https://cdn.jsdelivr.net/npm/');
+                for (const dep of ENGINE_ORDER) {
+                    if (!urls[dep]) continue;
+                    const u = ENGINE_CDN[dep];
+                    text = text.split('"' + u + '"').join('"' + urls[dep] + '"')
+                               .split("'" + u + "'").join("'" + urls[dep] + "'");
+                }
+                urls[name] = URL.createObjectURL(new Blob([text], { type: 'text/javascript' }));
+            }
+            const tf = await import(/* @vite-ignore */ urls['transformers.js']);
+            // ort 支持 wasmPaths = { wasm, mjs } 这种对象写法（源码里 a?.wasm / a?.mjs），
+            // 正好能让这两个文件也走 blob，否则默认会去 transformers 的 dist 目录拉
+            if (tf.env && tf.env.backends && tf.env.backends.onnx) {
+                tf.env.backends.onnx.wasm.wasmPaths = {
+                    wasm: URL.createObjectURL(raw[ENGINE_WASM]),
+                    mjs: URL.createObjectURL(raw[ENGINE_MJS])
+                };
+            }
+            return await import(/* @vite-ignore */ urls['kokoro.js']);
+        })().catch((e) => {
+            enginePromise = null;
+            return null;
+        });
+        const mod = await enginePromise;
+        if (!mod) enginePromise = null;   // 缺文件时别把这个 null 缓存住
+        else engineLocal = true;
+        return mod;
+    }
+
+
     async function ensureModel() {
         if (tts) return tts;
         if (ttsPromise) return ttsPromise;
@@ -397,7 +512,9 @@
         updateUI();
 
         ttsPromise = (async () => {
-            const mod = await import(/* @vite-ignore */ KOKORO_CDN);
+            // 先试本地引擎（离线包里带的），没有才回 CDN
+            const local = await loadEngine();
+            const mod = local || (await import(/* @vite-ignore */ KOKORO_CDN));
 
             // 有 WebGPU 就走 GPU，否则退回 WASM。
             // 注意 dtype 必须是 fp32：fp16 在这套模型上会把声码器算坏，
@@ -563,10 +680,12 @@
         ensureModel().catch(() => {});
     }
 
-    // ========== 离线导入模型 ==========
-    // 给「完全没网」的场景用：选一次模型文件夹，把文件按 transformers.js 的
-    // 缓存键（就是 HuggingFace 的原始 URL）写进 Cache Storage，之后它直接命中缓存，
-    // 一个字节的网络请求都不会发。不需要本地服务器，也不需要什么额外权限。
+    // ========== 离线导入 ==========
+    // 给「完全没网」的场景用：选一次整个包目录，脚本会同时收两样东西——
+    //   model/  → 按 transformers.js 的缓存键（HuggingFace 原始 URL）写进 Cache Storage
+    //   engine/ → 5 个 +esm、wasm、mjs 写进 IndexedDB，运行时转成 blob URL
+    // 两边都齐了就是真离线：模型命中缓存，引擎走 blob，一个字节都不出网。
+    // 不需要本地服务器，也不需要额外权限（input[webkitdirectory] 就够）。
     const MODEL_BASE = 'https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/';
     const MODEL_FILES = ['config.json', 'tokenizer.json', 'tokenizer_config.json'];
     const MODEL_DIRS = ['onnx/', 'voices/'];
@@ -587,8 +706,19 @@
         const voice = await caches.open('kokoro-voices');
         let n = 0;
         let bytes = 0;
+        let engine = 0;
         const names = [];
         for (const f of fileList) {
+            const base = f.name;
+            // 引擎文件（engine/ 目录）按文件名认，存进 IndexedDB，运行时变成 blob
+            if (ENGINE_FILES.indexOf(base) >= 0) {
+                if (await idbPutEngine(base, f)) engine++;
+                n++;
+                bytes += f.size;
+                names.push('engine/' + base);
+                if (ui.status) ui.status.textContent = '正在导入 ' + n + ' 个文件 · ' + (bytes / 1048576).toFixed(0) + 'MB';
+                continue;
+            }
             const rel = modelRelPath(f.webkitRelativePath || f.name);
             if (!rel) continue;
             const cache = rel.indexOf('voices/') === 0 ? voice : main;
@@ -598,7 +728,8 @@
             names.push(rel);
             if (ui.status) ui.status.textContent = '正在导入 ' + n + ' 个文件 · ' + (bytes / 1048576).toFixed(0) + 'MB';
         }
-        return { n, bytes, names };
+        if (engine) enginePromise = null;   // 引擎换过了，之前加载的作废
+        return { n, bytes, names, engine };
     }
 
     async function pickModelFolder() {
@@ -622,7 +753,9 @@
                     settings.modelCached = true;
                     saveSettings();
                     refreshCacheCount();
-                    toast('已导入 ' + r.n + ' 个文件 · ' + (r.bytes / 1048576).toFixed(0) + 'MB，现在断网也能用');
+                    toast('已导入 ' + r.n + ' 个文件 · ' + (r.bytes / 1048576).toFixed(0) + 'MB'
+                        + (r.engine >= ENGINE_FILES.length ? '（含离线引擎）' : '')
+                        + '，现在断网也能用');
                 }
             } catch (e) {
                 toast('导入失败：' + String((e && e.message) || e).slice(0, 60));
@@ -1813,8 +1946,10 @@
             ui.hint.textContent = '神经语音更自然，但首次需下载模型。';
         } else if (ttsState === 'ready') {
             ui.status.textContent = '神经语音已就绪 · ' + (ttsDevice === 'webgpu' ? 'WebGPU 加速' : 'CPU（较慢）')
-                + ' · 已缓存 ' + cacheCount + ' 句';
-            ui.hint.textContent = '生成的音频会存本地，重复播放零等待。';
+                + (engineLocal ? ' · 离线引擎' : '') + ' · 已缓存 ' + cacheCount + ' 句';
+            ui.hint.textContent = engineLocal
+                ? '引擎和模型都在本地，完全断网也能读。'
+                : '生成的音频会存本地，重复播放零等待。';
         } else if (ttsState === 'loading') {
             ui.status.textContent = '正在下载语音模型 ' + loadPct + '% …（首次约 ' + sizeLabel() + '，之后离线可用）';
             ui.hint.textContent = '下载期间可以继续用系统语音。';
