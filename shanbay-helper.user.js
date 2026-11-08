@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         扇贝单词助手 - Shanbay Words Helper
 // @namespace    http://tampermonkey.net/
-// @version      2.2.0
+// @version      2.3.0
 // @description  扇贝单词网页版：英文例句 / 引文 / 短语点击朗读（本地神经语音 Kokoro，WebGPU 加速，离线可用），右下角齿轮可换音色与语速；例句与引文字号放大
 // @author       You
 // @match        *://web.shanbay.com/*
@@ -122,6 +122,10 @@
     const SPEAKER_ICON = "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'"
         + " fill='none' stroke='%23888888' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E"
         + "%3Cpath d='M11 5 6 9H2v6h4l5 4V5z'/%3E%3Cpath d='M15.5 8.5a5 5 0 0 1 0 7'/%3E%3C/svg%3E\")";
+    // 整段用的实心喇叭：和单句的空心喇叭并排时能一眼分开
+    const SPEAKER_ICON_SOLID = "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'"
+        + " fill='%23888888' stroke='%23888888' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E"
+        + "%3Cpath d='M11 5 6 9H2v6h4l5 4V5z'/%3E%3Cpath d='M15.5 8.5a5 5 0 0 1 0 7' fill='none'/%3E%3C/svg%3E\")";
 
     const CSS = `
         /* ========== 字号 ========== */
@@ -192,34 +196,46 @@
             -webkit-user-select: none; user-select: none;
         }
         .sb-ic:hover { opacity: 1; background-color: rgba(32, 158, 133, .12); }
-        /* 整段的图标挂在段尾，比单句的大一号、也更实一点，别和最后一句的图标混在一起 */
+        /* 整段的图标挂在最后一个英文句子旁边：实心喇叭 + 大一号，和单句区分开 */
         .sb-ic-para {
             width: 20px; height: 20px;
             margin-left: 10px;
+            background-image: ${SPEAKER_ICON_SOLID};
             background-size: 15px 15px;
             opacity: .34;
         }
         /* 正在读的那句/那段：图标跟着亮起来 */
         .sb-block.sb-speaking .sb-ic { opacity: .9; }
 
-        /* 全文朗读：固定右下角，紧挨着设置齿轮（齿轮 right:20px） */
-        .sb-ic-article {
-            position: fixed; right: 74px; bottom: 20px; z-index: 2147483001;
-            width: 42px; height: 42px; margin: 0; border-radius: 50%;
-            background-color: #fff;
-            background-position: center;
-            background-size: 19px 19px;
+        /* 页面顶部工具条：全文阅读 + 导出音频。固定在右上角，不占正文流。 */
+        .sb-bar {
+            position: fixed; top: 14px; right: 20px; z-index: 2147483001;
+            display: flex; gap: 8px;
+        }
+        .sb-bar-btn {
+            display: inline-flex; align-items: center; gap: 6px;
+            height: 34px; padding: 0 14px;
+            border-radius: 17px;
             border: 1px solid #e2eae7;
-            box-shadow: 0 4px 16px rgba(0, 0, 0, .12);
-            opacity: 1;
+            background: #fff; color: #147864;
+            font: 600 13px/1 -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+            cursor: pointer; white-space: nowrap;
+            box-shadow: 0 4px 14px rgba(0, 0, 0, .10);
+            transition: background-color .15s ease, border-color .15s ease;
         }
-        .sb-ic-article:hover { background-color: #f2f9f7; }
-        .sb-ic-article.on {
-            border-color: #147864;
-            box-shadow: 0 0 0 2px rgba(20, 120, 100, .35), 0 4px 16px rgba(0, 0, 0, .12);
+        .sb-bar-btn:hover { background: #f2f9f7; }
+        .sb-bar-btn.on { background: #147864; border-color: #147864; color: #fff; }
+        .sb-bar-btn.on .sb-bar-ic { filter: invert(1) brightness(2); }
+        /* 全文阅读按钮上的小喇叭 */
+        .sb-bar-ic {
+            width: 14px; height: 14px;
+            background: ${SPEAKER_ICON} center / contain no-repeat;
         }
-        html[data-theme="dark"] .sb-ic-article { background-color: #1c2422; border-color: #2e3a37; }
-        html[data-theme="dark"] .sb-ic-article:hover { background-color: #24302d; }
+        html[data-theme="dark"] .sb-bar-btn {
+            background: #1c2422; border-color: #2e3a37; color: #6fd3b8;
+        }
+        html[data-theme="dark"] .sb-bar-btn:hover { background: #24302d; }
+        html[data-theme="dark"] .sb-bar-btn.on { background: #147864; color: #fff; }
 
         /* ========== 朗读提示 ========== */
         ${speakRule('')} { cursor: pointer; }
@@ -653,7 +669,9 @@
 
     // ========== 统一入口 ==========
     async function speak(text, el, opts) {
-        if (!text) return;
+        // 唯一入口统一清洗：中文译文、全角标点一律剔掉，别念出来
+        text = cleanForTTS(text);
+        if (!text || !/[a-zA-Z]/.test(text)) return;
 
         // 再点同一句 = 停止
         if (el && el === currentEl) {
@@ -719,20 +737,38 @@
     // 页面上「叶子块级元素 + 主要是英文 + 够长」的那些就是正文段落。
     const ARTICLE_MIN_BLOCKS = 2;
     const ARTICLE_MIN_CHARS = 200;
+    // 中日韩文字。阅读页每句后面挂着中文翻译，朗读时要整段剔掉
+    const CJK_RE = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff]/;
+    const CJK_RUN_RE = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff]+/g;
+    const FULLWIDTH_RE = /[\u3000-\u303f\uff01-\uff5e]/g;
 
     let articleBlocks = [];
     let readingAll = false;
     let playResolve = null;
     let readProgress = { done: 0, total: 0 };
 
+    // 朗读前统一清洗：剔掉中文翻译和全角标点，剩下的才是要念的英文。
+    // 放在唯一入口上，无论从哪条路径（点句子 / 整段 / 全文 / 导出）进来都不会念到译文。
+    function cleanForTTS(text) {
+        return String(text || '')
+            .replace(CJK_RUN_RE, ' ')
+            .replace(FULLWIDTH_RE, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+    }
+
     function isReadingPage() {
         return location.pathname.indexOf('/reading/') >= 0;
     }
 
+    // 判断一块是不是英文正文。中英对照的段落里中文占比很高，
+    // 按整段算比例会把正文判掉，所以先把中文剔掉再算。
     function looksEnglish(text) {
-        if (!text || text.length < 15) return false;
-        const letters = (text.match(/[A-Za-z]/g) || []).length;
-        return letters / text.length >= 0.55;
+        if (!text) return false;
+        const s = text.replace(CJK_RUN_RE, '');
+        if (s.length < 15) return false;
+        const letters = (s.match(/[A-Za-z]/g) || []).length;
+        return letters / s.length >= 0.55;
     }
 
     function clearArticle() {
@@ -743,13 +779,17 @@
         document.querySelectorAll('.sb-ic-sent').forEach((ic) => ic.remove());
         articleBlocks = [];
         document.documentElement.classList.remove('sb-read');
-        syncArticleButton();
+        syncReadBar();
     }
 
     // ---------- 三级小喇叭 ----------
-    // 全文（右下角固定）/ 全段（段尾）/ 单句（每个句子后面）
+    // 全文（页面顶部工具条）/ 全段（段尾）/ 单句（每个句子后面）
     // 用真实元素而不是 ::after：要单独接点击事件；宽度固定，出现消失不回流。
-    let articleBtn = null;
+    let readBar = null;
+    let readAllBtn = null;
+    let exportBtn = null;
+    let exporting = false;
+    let exportProgress = 0;
 
     function makeIcon(kind, title) {
         const el = document.createElement('span');
@@ -759,31 +799,52 @@
         return el;
     }
 
-    function syncArticleButton() {
+    // 页面顶部的工具条：全文朗读 + 导出 MP3。
+    // 阅读页才有，正文没扫到之前不出现，免得在别的页面上碍事。
+    function syncReadBar() {
         const show = isReadingPage() && articleBlocks.length > 0;
         if (!show) {
-            if (articleBtn) { articleBtn.remove(); articleBtn = null; }
+            if (readBar) { readBar.remove(); readBar = null; readAllBtn = null; exportBtn = null; }
             return;
         }
-        if (!articleBtn) {
-            articleBtn = makeIcon('article', '朗读全文');
-            (document.body || document.documentElement).appendChild(articleBtn);
+        if (!readBar) {
+            readBar = document.createElement('div');
+            readBar.className = 'sb-bar';
+
+            readAllBtn = document.createElement('button');
+            readAllBtn.type = 'button';
+            readAllBtn.className = 'sb-bar-btn sb-bar-read';
+            readAllBtn.innerHTML = '<i class="sb-bar-ic"></i><span>全文阅读</span>';
+            readAllBtn.addEventListener('click', readArticle);
+
+            exportBtn = document.createElement('button');
+            exportBtn.type = 'button';
+            exportBtn.className = 'sb-bar-btn sb-bar-export';
+            exportBtn.textContent = '导出音频';
+            exportBtn.title = '把整篇文章合成一个 MP3 下载';
+            exportBtn.addEventListener('click', exportAudio);
+
+            readBar.appendChild(readAllBtn);
+            readBar.appendChild(exportBtn);
+            (document.body || document.documentElement).appendChild(readBar);
         }
-        articleBtn.classList.toggle('on', readingAll);
-        articleBtn.title = readingAll ? '停止朗读（' + readProgress.done + '/' + readProgress.total + '）' : '朗读全文';
+        readAllBtn.classList.toggle('on', readingAll);
+        readAllBtn.lastChild.textContent = readingAll
+            ? '停止（' + readProgress.done + '/' + readProgress.total + '）'
+            : '全文阅读';
+        exportBtn.textContent = exporting
+            ? '导出 ' + exportProgress + '%'
+            : '导出音频';
     }
 
     // 给每个段落挂「整段」图标，给每个句子挂「单句」图标。
     // 只插在句子 span 之后，不碰文本节点；React 重渲染冲掉了就再补一次。
     function decorateArticle() {
         articleBlocks.forEach((block) => {
-            if (!block.querySelector(':scope > .sb-ic-para')) {
-                block.appendChild(makeIcon('para', '朗读整段'));
-            }
             const kids = block.children;
             for (let i = 0; i < kids.length; i++) {
                 const el = kids[i];
-                if (el.classList.contains('sb-ic')) continue;
+                if (el.classList.contains('sb-ic') || isTranslation(el)) continue;
                 const t = (el.textContent || '').trim();
                 if (t.length < 2 || !/[.!?"'”’)\]]$/.test(t)) continue;
                 const nx = el.nextElementSibling;
@@ -792,8 +853,19 @@
                 ic.__sbText = t;
                 el.parentNode.insertBefore(ic, el.nextSibling);
             }
+            // 整段图标跟最后一个英文句子待在一起，别掉到中文译文后面去
+            if (!block.querySelector(':scope > .sb-ic-para')) {
+                const kids2 = [...block.children];
+                const sents = kids2.filter((el) => el.classList.contains('sb-ic-sent'));
+                const anchor = sents.length
+                    ? sents[sents.length - 1]
+                    : kids2.reverse().find((el) => !isTranslation(el) && !el.classList.contains('sb-ic')) || null;
+                const ic = makeIcon('para', '朗读整段');
+                if (anchor) anchor.parentNode.insertBefore(ic, anchor.nextSibling);
+                else block.appendChild(ic);
+            }
         });
-        syncArticleButton();
+        syncReadBar();
     }
 
     // 站点把每句话渲染成独立的行内元素（<sent> → span），句间不补空格，
@@ -908,9 +980,22 @@
         const parts = [];
         block.childNodes.forEach((n) => {
             if (n.nodeType === 3) parts.push(n.nodeValue || '');
-            else if (n.nodeType === 1 && !n.classList.contains('sb-ic')) parts.push(n.textContent || '');
+            else if (n.nodeType === 1 && !n.classList.contains('sb-ic') && !isTranslation(n)) {
+                parts.push(n.textContent || '');
+            }
         });
         return parts.join(' ').replace(/\s+/g, ' ').trim();
+    }
+
+    // 中英对照里「中文翻译」那一块：中文字符占一半以上就当译文，
+    // 整块跳过——既不给它挂喇叭，也不念。
+    function isTranslation(node) {
+        const t = (node.textContent || '').trim();
+        if (!t) return false;
+        const solid = t.replace(/\s/g, '');
+        if (!solid) return false;
+        const cjk = (t.match(CJK_RUN_RE) || []).join('').length;
+        return cjk / solid.length >= 0.5;
     }
 
     // 点在哪一句就读哪一句：用 caretRangeFromPoint 拿到字符偏移，再按句切
@@ -1005,7 +1090,7 @@
         readProgress = { done: 0, total: blocks.length };
         updateUI();
 
-        const texts = blocks.map(blockText);
+        const texts = blocks.map(blockText).map(cleanForTTS);
 
         try {
             if (settings.engine === 'system') {
@@ -1056,12 +1141,143 @@
                 }
             }
         } finally {
-            if (myGen === gen) {
-                readingAll = false;
-                clearHighlight();
-                readProgress = { done: 0, total: 0 };
-                updateUI();
+            // 中途 stopAll() 会 +gen，这时也要把状态收干净，
+            // 否则按钮会永远卡在「停止」上，再点也开不了新的朗读
+            readingAll = false;
+            readProgress = { done: 0, total: 0 };
+            if (myGen === gen) clearHighlight();
+            updateUI();
+        }
+    }
+
+    // ========== 导出整篇音频（MP3） ==========
+    // 逐段合成 → 段间插 0.35s 静音 → 拼成一整条 → lamejs 编 MP3。
+    // lamejs 走 CDN（150KB，浏览器会缓存）；拿不到就退回 WAV，别让功能直接死掉。
+    const LAME_CDN = 'https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.min.js';
+    let lamePromise = null;
+
+    function loadLame() {
+        if (window.lamejs) return Promise.resolve(window.lamejs);
+        if (lamePromise) return lamePromise;
+        lamePromise = new Promise((resolve, reject) => {
+            const s = document.createElement('script');
+            s.src = LAME_CDN;
+            s.onload = () => (window.lamejs ? resolve(window.lamejs) : reject(new Error('lamejs 未就绪')));
+            s.onerror = () => reject(new Error('lamejs 下载失败'));
+            (document.head || document.documentElement).appendChild(s);
+        });
+        lamePromise.catch(() => { lamePromise = null; });
+        return lamePromise;
+    }
+
+    // 取一段音频的原始采样：缓存里解得出来就用缓存（快），否则现合成
+    async function synthSamples(text) {
+        const saved = await idbGet(cacheKey(text));
+        if (saved) {
+            try {
+                const Ctx = window.AudioContext || window.webkitAudioContext;
+                const ac = new Ctx({ sampleRate: 24000 });
+                const audio = await ac.decodeAudioData(await saved.arrayBuffer());
+                const out = audio.getChannelData(0).slice();
+                const rate = audio.sampleRate;
+                ac.close();
+                return { samples: out, sampleRate: rate };
+            } catch (e) { /* 解不出来就重新合成 */ }
+        }
+        const model = await ensureModel();
+        const audio = await model.generate(text, { voice: settings.voice, speed: settings.rate });
+        return { samples: audio.audio, sampleRate: audio.sampling_rate };
+    }
+
+    function encodeMp3(samples, rate, lame) {
+        const enc = new lame.Mp3Encoder(1, rate, 64);
+        const block = 1152;
+        const buf = new Int16Array(block);
+        const out = [];
+        for (let i = 0; i < samples.length; i += block) {
+            const n = Math.min(block, samples.length - i);
+            for (let j = 0; j < n; j++) {
+                const v = Math.max(-1, Math.min(1, samples[i + j]));
+                buf[j] = v < 0 ? v * 0x8000 : v * 0x7fff;
             }
+            for (let j = n; j < block; j++) buf[j] = 0;  // 末块补齐
+            const data = enc.encodeBuffer(buf);
+            if (data.length) out.push(new Int8Array(data));
+        }
+        const tail = enc.flush();
+        if (tail.length) out.push(new Int8Array(tail));
+        return new Blob(out, { type: 'audio/mpeg' });
+    }
+
+    function saveBlob(blob, ext) {
+        const base = (document.title || 'shanbay-article')
+            .replace(/[\\/:*?"<>|\s]+/g, '_')
+            .replace(/^_+|_+$/g, '')
+            .slice(0, 40) || 'shanbay-article';
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = base + '.' + ext;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 60000);
+    }
+
+    async function exportAudio() {
+        if (exporting) return;
+        if (!articleBlocks.length) { toast('没找到正文'); return; }
+        if (settings.engine !== 'neural') { toast('导出需要神经语音引擎'); return; }
+
+        const texts = articleBlocks.map(blockText).map(cleanForTTS)
+            .filter((t) => t && /[a-zA-Z]/.test(t));
+        if (!texts.length) { toast('没有可导出的内容'); return; }
+
+        exporting = true;
+        exportProgress = 0;
+        syncReadBar();
+        stopAll();
+        setBusy(true);
+        try {
+            if (ttsState !== 'ready') await ensureModel();
+
+            const parts = [];
+            let rate = 24000;
+            for (let i = 0; i < texts.length; i++) {
+                const r = await synthSamples(texts[i]);
+                rate = r.sampleRate || rate;
+                parts.push(r.samples);
+                parts.push(new Float32Array(Math.round(rate * 0.35)));
+                exportProgress = Math.round(((i + 1) / texts.length) * 90);
+                syncReadBar();
+            }
+
+            const total = parts.reduce((n, p) => n + p.length, 0);
+            const all = new Float32Array(total);
+            let off = 0;
+            parts.forEach((p) => { all.set(p, off); off += p.length; });
+
+            exportProgress = 95;
+            syncReadBar();
+            let blob;
+            let ext = 'mp3';
+            try {
+                blob = encodeMp3(all, rate, await loadLame());
+            } catch (e) {
+                // 拿不到 lamejs（离线 / CDN 被墙）就导 WAV，至少能听
+                blob = encodeWav16(all, rate);
+                ext = 'wav';
+            }
+            saveBlob(blob, ext);
+            toast('已导出 ' + ext.toUpperCase() + ' · ' + (blob.size / 1048576).toFixed(1) + 'MB · '
+                + Math.round(total / rate) + ' 秒');
+        } catch (e) {
+            toast('导出失败：' + String((e && e.message) || e).slice(0, 60));
+        } finally {
+            exporting = false;
+            exportProgress = 0;
+            setBusy(false);
+            syncReadBar();
         }
     }
 
@@ -1121,10 +1337,6 @@
             if (ic) {
                 e.preventDefault();
                 e.stopPropagation();
-                if (ic.classList.contains('sb-ic-article')) {
-                    readArticle();
-                    return;
-                }
                 if (ic.classList.contains('sb-ic-para')) {
                     const block = ic.closest('.sb-block');
                     if (block) speak(blockText(block), block);
@@ -1554,7 +1766,7 @@
                 : '朗读全文';
             ui.readall.classList.toggle('primary', readingAll);
         }
-        syncArticleButton();
+        syncReadBar();
     }
 
     // 首次点朗读但模型没下载：面板里的「试听」就是下载入口，
@@ -1691,7 +1903,7 @@
             articleObsTimer = setTimeout(scanArticle, 1200);
         }).observe(document.body, { childList: true, subtree: true });
 
-        console.log('[扇贝助手] v2.2.0 已加载：' + settings.engine + ' / ' + settings.rate + 'x');
+        console.log('[扇贝助手] v2.3.0 已加载：' + settings.engine + ' / ' + settings.rate + 'x');
     }
 
     if (document.readyState === 'loading') {
