@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         全局字体与文字颜色 - Global Font Helper
 // @namespace    http://tampermonkey.net/
-// @version      1.1.1
-// @description  给所有网页统一设置字体与文字颜色：内置 8 套中英文友好字体栈（含 HarmonyOS Sans、MiSans、思源黑体、普惠体、霞鹜文楷），颜色默认 #0b214a，可在 Tampermonkey 菜单里随时切换，设置跨站持久生效
+// @version      1.2.0
+// @description  给所有网页统一设置字体与文字颜色：内置 8 套中英文友好字体栈（含 HarmonyOS Sans、MiSans、思源黑体、普惠体、霞鹜文楷），颜色默认 #0b214a，可在 Tampermonkey 菜单里随时切换，设置跨站持久生效；自动跳过页面里的深色区域（如元宝隐身模式的输入框）
 // @author       You
 // @match        *://*/*
 // @grant        GM_registerMenuCommand
@@ -110,6 +110,12 @@
     // 结果就是整页看不出哪条是链接。按钮、role=link 同理。
     const SMART_SELECTOR = ':not(a):not(a *):not([role="link"]):not([role="link"] *):not(button):not(button *):not([role="button"]):not([role="button"] *):not(input):not(textarea):not(select):not(option):not(code):not(pre):not(kbd):not(samp):not(mark):not(svg):not(svg *):not([class*="btn"]):not([class*="button"]):not([class*="badge"]):not([class*="chip"]):not([class*="tag"]):not([class*="icon"])';
 
+    // 深色容器：整页浅色但局部是深色底（元宝隐身模式输入框 #303030、临时对话 #1D1D1D），
+    // 深蓝字压上去就看不清了。运行时给这类容器打 .gfc-dark，这里连同子孙一起放过。
+    const DARK_SELECTOR = ':not(.gfc-dark):not(.gfc-dark *)';
+    // 自带的 toast 是深底白字，别被染色
+    const SELF_SELECTOR = ':not(#gfc-toast):not(#gfc-toast *)';
+
     const CSS = `
         /* ========== 字体 ========== */
         html.gfc-font body,
@@ -120,12 +126,12 @@
         /* ========== 文字颜色 ========== */
         /* 智能模式：只染正文，链接/按钮/表单/代码/图标保留站点原色 */
         html.gfc-color[data-gfc-scope="smart"] body,
-        html.gfc-color[data-gfc-scope="smart"] body ${SMART_SELECTOR} {
+        html.gfc-color[data-gfc-scope="smart"] body ${SMART_SELECTOR}${DARK_SELECTOR}${SELF_SELECTOR} {
             color: var(--gfc-color) !important;
         }
         /* 全部模式：除了 svg 图标，其他文字一律染色 */
         html.gfc-color[data-gfc-scope="all"] body,
-        html.gfc-color[data-gfc-scope="all"] body :not(svg):not(svg *) {
+        html.gfc-color[data-gfc-scope="all"] body :not(svg):not(svg *)${DARK_SELECTOR}${SELF_SELECTOR} {
             color: var(--gfc-color) !important;
         }
     `;
@@ -268,6 +274,88 @@
         const wantColor = settings.enabled && !pageIsDark();
         html.classList.toggle('gfc-font', settings.enabled);
         html.classList.toggle('gfc-color', wantColor);
+
+        // 记下自己改完后的状态，属性观察器据此忽略自身引起的变动
+        lastHtmlSnapshot = htmlSnapshot();
+        scheduleScan();
+    }
+
+    // ========== 局部深色区域 ==========
+    // pageIsDark() 只看整页底色。站点常见另一种情况：整页浅色，但某个容器自带深色底，
+    // 比如元宝「隐身模式」的输入框（--background-container:#303030、page:#1D1D1D）。
+    // 深蓝字压在这种底上等于看不见，所以给这类容器打 .gfc-dark，让颜色规则放过它和它的子孙。
+    const DARK_CLASS = 'gfc-dark';
+    const DARK_LUM = 0.45;     // 与 pageIsDark 的阈值保持一致
+    const SCAN_LIMIT = 20000;  // 节点太多就别扫了，免得拖慢页面（2 万节点约 15ms）
+    const SCAN_GAP = 1500;     // 两次扫描的最小间隔
+    const SCAN_DELAY = 500;
+
+    let darkMarked = new Set();
+    let scanTimer = null;
+    let lastScan = 0;
+
+    function scanDarkRegions() {
+        if (!document.body) return;
+        const nodes = document.body.querySelectorAll('*');
+        if (nodes.length > SCAN_LIMIT) return;
+
+        const next = new Set();
+        for (let i = 0; i < nodes.length; i++) {
+            const el = nodes[i];
+            // 只看自身底色：半透明/无底色的返回 null，直接跳过
+            const lum = luminance(getComputedStyle(el).backgroundColor);
+            if (lum === null || lum >= DARK_LUM) continue;
+            next.add(el);
+            if (!el.classList.contains(DARK_CLASS)) el.classList.add(DARK_CLASS);
+        }
+        // 切回浅色主题/退出隐身模式后，把过期的标记摘掉
+        darkMarked.forEach((el) => {
+            if (!next.has(el)) el.classList.remove(DARK_CLASS);
+        });
+        darkMarked = next;
+    }
+
+    function scheduleScan() {
+        if (scanTimer) return;
+        const wait = Math.max(SCAN_DELAY, SCAN_GAP - (Date.now() - lastScan));
+        scanTimer = setTimeout(() => {
+            scanTimer = null;
+            lastScan = Date.now();
+            scanDarkRegions();
+        }, wait);
+    }
+
+    let lastHtmlSnapshot = '';
+
+    function htmlSnapshot() {
+        const html = document.documentElement;
+        return (html.getAttribute('class') || '') + '|' + (html.getAttribute('style') || '');
+    }
+
+    // 页面是 SPA：新挂载的深色容器要重新识别，主题切换要重新判断整页深浅
+    function observePage() {
+        if (!document.body) return;
+
+        new MutationObserver(scheduleScan).observe(document.body, {
+            childList: true,
+            subtree: true
+        });
+
+        // 底色多半是换 class / 内联 style 换出来的（切主题、进/退隐身模式），
+        // 这类改动不产生 childList，得单独盯属性
+        new MutationObserver(scheduleScan).observe(document.body, {
+            attributes: true,
+            attributeFilter: ['class', 'style'],
+            subtree: true
+        });
+
+        new MutationObserver(() => {
+            if (htmlSnapshot() === lastHtmlSnapshot) return; // 自己改的，忽略
+            apply();
+        }).observe(document.documentElement, {
+            attributes: true,
+            attributeFilter: ['class', 'style', 'data-theme', 'yb-theme-mode']
+        });
     }
 
     // ========== 轻提示 ==========
@@ -382,12 +470,16 @@
 
         // document-start 时还没有 body，颜色深色判断和菜单提示都等 DOM 就绪再来一次
         if (document.readyState === 'loading') {
-            document.addEventListener('DOMContentLoaded', apply, { once: true });
+            document.addEventListener('DOMContentLoaded', () => {
+                apply();
+                observePage();
+            }, { once: true });
         } else {
             apply();
+            observePage();
         }
 
-        console.log('[全局字体] v1.1.1 已加载：' + fontOf(settings.font).label + ' / ' + settings.color);
+        console.log('[全局字体] v1.2.0 已加载：' + fontOf(settings.font).label + ' / ' + settings.color);
     }
 
     bootstrap();
