@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         英文朗读助手（扇贝 / 新闻 / 故事）
 // @namespace    http://tampermonkey.net/
-// @version      2.6.1
+// @version      2.6.2
 // @description  英文网页点句朗读（本地神经语音 Kokoro，WebGPU 加速，引擎与模型全离线），整段/全文一键连读、导出 MP3；支持扇贝阅读、CNN/BBC/NYT/卫报/VOA 等新闻站与 StoryNory/Gutenberg 等故事站
 // @author       You
 // @match        *://web.shanbay.com/*
@@ -543,6 +543,20 @@
         });
     }
 
+    async function idbClearEngine() {
+        const db = await openDB();
+        if (!db) return;
+        await new Promise((resolve) => {
+            try {
+                const req = db.transaction(DB_ENGINE, 'readwrite').objectStore(DB_ENGINE).clear();
+                req.onsuccess = () => resolve();
+                req.onerror = () => resolve();
+            } catch (e) {
+                resolve();
+            }
+        });
+    }
+
     async function idbEngineCount() {
         const db = await openDB();
         if (!db) return 0;
@@ -828,8 +842,63 @@
 
     async function refreshSiteCached() {
         siteCached = await modelInCache();
+        refreshUsage();
         updateUI();
         return siteCached;
+    }
+
+    // 本站到底占了多少磁盘。Cache Storage 和 IndexedDB 都是按站点算的，
+    // navigator.storage.estimate() 给的正好是这个 origin 的用量。
+    let usageBytes = 0;
+
+    async function refreshUsage() {
+        try {
+            if (navigator.storage && navigator.storage.estimate) {
+                const est = await navigator.storage.estimate();
+                usageBytes = est.usage || 0;
+            }
+        } catch (e) { /* 拿不到就不显示 */ }
+        updateUI();
+    }
+
+    function fmtSize(n) {
+        if (!n) return '0MB';
+        return n >= 1073741824 ? (n / 1073741824).toFixed(1) + 'GB' : Math.round(n / 1048576) + 'MB';
+    }
+
+    // 清掉本站的模型 / 引擎 / 音频。别的站点不受影响（本来就各存各的）。
+    async function clearSiteCache() {
+        const msg = '清空本站的模型、引擎和音频缓存？\n'
+            + '（只影响当前站点，其他站点不受影响。下次用要重新导入一次。）';
+        if (typeof confirm === 'function' && !confirm(msg)) return;
+        setBusy(true);
+        try {
+            for (const name of await caches.keys()) {
+                try { await caches.delete(name); } catch (e) { /* ignore */ }
+            }
+            await idbClearEngine();
+            await idbClear();
+            tts = null;
+            ttsPromise = null;
+            ttsState = 'idle';
+            enginePromise = null;
+            engineLocal = false;
+            blobCache.forEach((u) => { try { URL.revokeObjectURL(u); } catch (e) { /* ignore */ } });
+            blobCache.clear();
+            siteCached = false;
+            cacheCount = 0;
+            // 这里不能再去问 estimate()：同一个文档里它的数字是滞后的
+            // （实测删完还报 315MB，刷新页面才变 0），所以直接按已知事实归零。
+            usageBytes = 0;
+            updateUI();
+            refreshCacheCount();
+            toast('本站缓存已清空');
+        } catch (e) {
+            toast('清理失败：' + String((e && e.message) || e).slice(0, 40));
+        } finally {
+            setBusy(false);
+            updateUI();
+        }
     }
 
     async function modelInCache() {
@@ -944,6 +1013,12 @@
                     saveSettings();
                     refreshCacheCount();
                     refreshSiteCached();
+                    // 导入会把 model.onnx(310MB) 和 model_quantized.onnx(88MB) 都塞进去，
+                    // 但推理只用得上其中一份。留着另一份纯占地方，直接按当前设备清掉。
+                    // 用 detectGPU() 现问一次，而不是看 gpuReady——那个是启动时异步填的，
+                    // 刚打开页面就导入的话可能还是 false，会把 GPU 版删掉。
+                    detectGPU().then((hd) =>
+                        purgeStaleModels(hd ? 'model.onnx' : 'model_quantized.onnx')).then(refreshUsage);
                     toast('已导入 ' + r.n + ' 个文件 · ' + (r.bytes / 1048576).toFixed(0) + 'MB'
                         + (r.engine >= ENGINE_FILES.length ? '（含离线引擎）' : '')
                         + '，现在断网也能用');
@@ -2010,6 +2085,18 @@
         :host { all: initial; }
         * { box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; }
 
+        .usage {
+            margin-top: 8px; font-size: 12px; color: #8a938f;
+            display: flex; justify-content: space-between; align-items: center; gap: 10px;
+        }
+        .usage-clear {
+            color: #a4562a; cursor: pointer; text-decoration: none;
+            border-bottom: 1px dashed rgba(164, 86, 42, .35); white-space: nowrap;
+        }
+        .usage-clear:hover { border-bottom-style: solid; }
+        :host(.dark) .usage { color: #7d8a86; }
+        :host(.dark) .usage-clear { color: #e0a074; border-bottom-color: rgba(224, 160, 116, .35); }
+
         .sites { margin-top: 8px; text-align: right; }
         .sites-link {
             font: 12px/1 -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
@@ -2179,6 +2266,7 @@
                     <button class="clear">清空音频缓存</button>
                 </div>
                 <div class="hint"></div>
+                <div class="usage" hidden><span class="usage-text"></span><a class="usage-clear">清理本站</a></div>
                 <div class="sites"><a class="sites-link">支持的站点 ›</a></div>
             </div>
         `;
@@ -2207,7 +2295,10 @@
             import: shadow.querySelector('.import'),
             clear: shadow.querySelector('.clear'),
             hint: shadow.querySelector('.hint'),
-            sites: shadow.querySelector('.sites-link')
+            sites: shadow.querySelector('.sites-link'),
+            usage: shadow.querySelector('.usage'),
+            usageText: shadow.querySelector('.usage-text'),
+            usageClear: shadow.querySelector('.usage-clear')
         };
 
         ui.gear.addEventListener('click', () => {
@@ -2216,6 +2307,7 @@
         });
         ui.close.addEventListener('click', () => ui.panel.classList.remove('open'));
         ui.sites.addEventListener('click', (e) => { e.preventDefault(); openSiteList(); });
+        ui.usageClear.addEventListener('click', (e) => { e.preventDefault(); clearSiteCache(); });
 
         ui.seg.forEach((btn) => {
             btn.addEventListener('click', () => {
@@ -2355,6 +2447,11 @@
 
         ui.big.checked = settings.big;
         ui.prefetch.checked = settings.prefetch;
+        ui.usage.hidden = !(siteCached || usageBytes);
+        if (!ui.usage.hidden) {
+            ui.usageText.textContent = '本站占用 ' + fmtSize(usageBytes)
+                + (siteCached ? '' : '（没有模型）');
+        }
         ui.typo.checked = typoOn();
         // 扇贝阅读的排版是强制套用的，这一项只对别的站点有意义
         ui.typoRow.style.display = isShanbay() ? 'none' : '';
@@ -2598,7 +2695,7 @@
             articleObsTimer = setTimeout(scanArticle, 1200);
         }).observe(document.body, { childList: true, subtree: true });
 
-        console.log('[英文朗读助手] v2.6.1 已加载：' + settings.engine + ' / ' + settings.rate + 'x');
+        console.log('[英文朗读助手] v2.6.2 已加载：' + settings.engine + ' / ' + settings.rate + 'x');
     }
 
     if (document.readyState === 'loading') {
