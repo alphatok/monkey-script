@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         全局字体与文字颜色 - Global Font Helper
 // @namespace    http://tampermonkey.net/
-// @version      1.3.2
+// @version      1.3.3
 // @description  给所有网页统一设置字体与文字颜色：内置 8 套中英文友好字体栈（含 HarmonyOS Sans、MiSans、思源黑体、普惠体、霞鹜文楷），颜色默认 #0b214a，可在 Tampermonkey 菜单里随时切换，设置跨站持久生效；自动跳过页面里的深色区域（如元宝隐身模式的输入框）；可开启报纸模式（纸色底 + 衬线字 + 鼠标暖光）
 // @author       You
 // @match        *://*/*
@@ -117,7 +117,8 @@
         scope: 'smart', // smart = 跳过链接/按钮/代码等；all = 所有文字
         paper: true,    // 报纸模式：纸色底 + 衬线字
         paperColor: PAPER_COLORS[0].hex,
-        glow: true      // 鼠标跟随暖光
+        glow: true,     // 鼠标跟随暖光
+        glowBrightness: 35 // 光晕亮度：0～100，100 对应原版强度
     };
 
     const KEY = 'gfc.settings.v1';
@@ -221,6 +222,9 @@
         out.enabled = out.enabled !== false;
         out.paper = out.paper !== false;
         out.glow = out.glow !== false;
+        if (!Number.isInteger(out.glowBrightness) || out.glowBrightness < 0 || out.glowBrightness > 100) {
+            out.glowBrightness = DEFAULTS.glowBrightness;
+        }
         return out;
     }
 
@@ -333,6 +337,7 @@
         html.style.setProperty('--gfc-paper-font', PAPER_FONT);
         html.style.setProperty('--gfc-paper-grain', PAPER_GRAIN);
         html.style.setProperty('--gfc-color', settings.color);
+        html.style.setProperty('--gfc-glow-brightness', String(settings.glowBrightness / 100));
         html.dataset.gfcScope = settings.scope;
 
         const light = !pageIsDark();
@@ -422,7 +427,7 @@
                 gy = my;
                 place();
             }
-            if (glowActive && glowEl) glowEl.style.opacity = '1';
+            if (glowActive && glowEl) glowEl.style.opacity = 'var(--gfc-glow-brightness)';
             if (!calm && !raf) raf = requestAnimationFrame(step);
         }, { passive: true });
 
@@ -623,6 +628,17 @@
                 settings.glow ? '已关闭鼠标光晕' : '已开启鼠标光晕')
         );
 
+        add(`☀ 光晕亮度：${settings.glowBrightness}%（点击设置）`, () => {
+            const input = window.prompt('设置鼠标光晕亮度（0～100 的整数）\n0 为无光晕，100 为原版亮度，默认 35。', String(settings.glowBrightness));
+            if (input === null) return;
+            const value = input.trim();
+            if (!/^\d+$/.test(value) || Number(value) > 100) {
+                toast('请输入 0～100 的整数');
+                return;
+            }
+            change(() => { settings.glowBrightness = Number(value); }, `光晕亮度：${Number(value)}%`)();
+        });
+
         add('↺ 恢复默认设置', change(() => {
             settings = Object.assign({}, DEFAULTS);
         }, '已恢复默认设置'));
@@ -649,7 +665,7 @@
             observePage();
         }
 
-        console.log('[全局字体] v1.3.1 已加载：' + fontOf(settings.font).label + ' / ' + settings.color
+        console.log('[全局字体] v1.3.3 已加载：' + fontOf(settings.font).label + ' / ' + settings.color
             + (settings.paper ? ' / 报纸模式' : ''));
     }
 
